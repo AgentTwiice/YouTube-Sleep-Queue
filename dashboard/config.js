@@ -11,7 +11,6 @@ async function getCsrfToken() {
     csrfToken = data.csrf_token;
     return csrfToken;
 }
-
 async function protectedHeaders() {
     return {
         'Content-Type': 'application/json',
@@ -57,6 +56,7 @@ const elements = {
     saveBtn: document.getElementById('saveBtn'),
     previewBtn: document.getElementById('previewBtn'),
     resetBtn: document.getElementById('resetBtn'),
+    manageChannelsBtn: document.getElementById('manageChannelsBtn'),
     message: document.getElementById('message'),
     quotaUsed: document.getElementById('quotaUsed'),
     quotaRemaining: document.getElementById('quotaRemaining'),
@@ -195,6 +195,9 @@ function setupEventListeners() {
     elements.saveBtn.addEventListener('click', saveConfiguration);
     elements.previewBtn.addEventListener('click', previewChanges);
     elements.resetBtn.addEventListener('click', resetToDefaults);
+    elements.manageChannelsBtn.addEventListener('click', () => {
+        window.location.href = 'channels.html';
+    });
 }
 
 // Update keyword filter visibility based on selected mode
@@ -381,9 +384,16 @@ async function previewChanges() {
             return;
         }
 
-        // TODO: Implement preview refresh endpoint
-        // For now, just show a message
-        showMessage('Preview mode is coming soon! For now, save your changes and run a manual refresh.', 'success');
+        const response = await fetch(`${API_BASE}/api/refresh`, {
+            method: 'POST',
+            headers: await protectedHeaders(),
+            body: JSON.stringify({dry_run: true})
+        });
+        const result = await response.json();
+        if (response.status !== 202 || !result.success) {
+            throw new Error(result.error || 'Could not start preview');
+        }
+        showMessage(`Preview started. Job ID: ${result.job_id}`, 'success');
 
     } catch (error) {
         console.error('Error previewing:', error);
@@ -444,16 +454,5 @@ function setLoading(isLoading) {
         container.classList.add('loading');
     } else {
         container.classList.remove('loading');
-    }
-}
-
-// Format duration for display
-function formatDuration(seconds) {
-    if (seconds >= 3600) {
-        return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
-    } else if (seconds >= 60) {
-        return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-    } else {
-        return `${seconds}s`;
     }
 }

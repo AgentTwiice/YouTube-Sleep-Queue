@@ -1,50 +1,12 @@
-#!/usr/bin/env python3
-"""
-Convenience script to start the dashboard backend server.
+"""Local development entry point for the dashboard."""
 
-This script provides a simple way to start the backend with proper
-environment setup and logging configuration.
-"""
+from .app import create_app
 
-import os
-import sys
-from pathlib import Path
 
-def setup_environment():
-    """Set up the Python path and environment for the backend."""
-    # Add project root to Python path
-    project_root = Path(__file__).parent.parent.parent
-    sys.path.insert(0, str(project_root))
-    
-    # Change to project root directory (important for CLI integration)
-    os.chdir(project_root)
-    
-    print(f"📁 Working directory: {os.getcwd()}")
-    print(f"🐍 Python path includes: {project_root}")
+def main() -> None:
+    app = create_app()
+    app.run(host="127.0.0.1", port=5001, debug=False, use_reloader=False)
 
-def main():
-    """Start the backend server."""
-    print("🚀 Starting YouTube Playlist Dashboard Backend...")
-    
-    setup_environment()
-    
-    # Import and run the Flask app
-    from app import app, logger
-    
-    logger.info("Starting Flask development server")
-    
-    try:
-        app.run(
-            host='127.0.0.1',
-            port=5001,  # Changed from 5000 to avoid macOS AirPlay conflict
-            debug=True,
-            use_reloader=True
-        )
-    except KeyboardInterrupt:
-        print("\n👋 Backend server stopped")
-    except Exception as e:
-        print(f"❌ Error starting server: {e}")
-        sys.exit(1)
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

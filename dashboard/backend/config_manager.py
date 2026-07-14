@@ -1,246 +1,103 @@
-"""
-Configuration Manager for Dashboard
+"""Validated and atomic dashboard configuration persistence."""
 
-Handles configuration persistence using a hybrid approach:
-- Secrets (API keys) in .env file (gitignored)
-- User preferences in config.json (can be committed)
-- Merges both sources for complete configuration
-"""
+from __future__ import annotations
 
 import json
-import logging
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Mapping
 
+from yt_sub_playlist.config.env_loader import load_config_json
 from yt_sub_playlist.config.schema import ConfigSchema
-
-logger = logging.getLogger(__name__)
-
-# Default configuration file location
-CONFIG_FILE = Path(__file__).parent.parent.parent / "config.json"
+from yt_sub_playlist.core.atomic_io import atomic_write_json, preserve_corrupt_file
+from yt_sub_playlist.core.paths import AppPaths
 
 
 class ConfigManager:
-    """
-    Manages configuration persistence and retrieval.
+    DEFAULT_CONFIG = dict(ConfigSchema.DEFAULTS)
 
-    Separates secrets (in .env) from user preferences (in config.json).
-    Provides validation and default values.
-    """
+    def __init__(self, config_file: Path | None = None, data_dir: Path | None = None):
+        self.paths = AppPaths.resolve(data_dir)
+        self.config_file = Path(config_file) if config_file else self.paths.config
 
-    # Default user preferences
-    DEFAULT_CONFIG = {
-        **ConfigSchema.DEFAULTS,
-        "channel_whitelist": None,  # Legacy - kept for backward compatibility
-    }
+    def load_config(self) -> dict[str, Any]:
+        if self.config_file.exists():
+            try:
+                value = json.loads(self.config_file.read_text(encoding="utf-8"))
+                if not isinstance(value, dict):
+                    raise ValueError("the JSON root must be an object")
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                backup = preserve_corrupt_file(self.config_file)
+                raise ValueError(
+                    f"Configuration is invalid; preserved it as {backup}. Repair it before retrying."
+                ) from exc
+        elif self.paths.legacy_config.exists() and self.config_file == self.paths.config:
+            value = load_config_json(self.paths.legacy_config)
+        else:
+            value = {}
+        return ConfigSchema.validate_config(value, allow_runtime_keys=False)
 
-    def __init__(self, config_file: Optional[Path] = None):
-        """
-        Initialize configuration manager.
+    def save_config(self, config: Mapping[str, Any]) -> dict[str, Any]:
+        validated = ConfigSchema.validate_config(config, allow_runtime_keys=False)
+        atomic_write_json(self.config_file, validated, mode=0o600)
+        return validated
 
-        Args:
-            config_file: Path to config.json file (uses default if None)
-        """
-        self.config_file = config_file or CONFIG_FILE
-        self._ensure_config_file_exists()
-
-    def _ensure_config_file_exists(self) -> None:
-        """Create config file with defaults if it doesn't exist."""
-        if not self.config_file.exists():
-            logger.info(f"Creating default config file at {self.config_file}")
-            self.save_config(self.DEFAULT_CONFIG)
-
-    def load_config(self) -> Dict[str, Any]:
-        """
-        Load configuration from config.json.
-
-        Returns:
-            Configuration dictionary with user preferences
-        """
+    def validate_config(self, config: Any) -> dict[str, Any]:
         try:
-            with open(self.config_file, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-
-            # Merge with defaults for any missing keys
-            merged_config = self.DEFAULT_CONFIG.copy()
-            merged_config.update(config)
-
-            logger.debug(f"Loaded config from {self.config_file}")
-            return merged_config
-
-        except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON in config file: {e}")
-            logger.warning("Using default configuration")
-            return self.DEFAULT_CONFIG.copy()
-        except Exception as e:
-            logger.error(f"Error loading config: {e}")
-            return self.DEFAULT_CONFIG.copy()
-
-    def save_config(self, config: Dict[str, Any]) -> bool:
-        """
-        Save configuration to config.json.
-
-        Args:
-            config: Configuration dictionary to save
-
-        Returns:
-            True if save successful, False otherwise
-        """
-        try:
-            # Validate before saving
-            validation_result = self.validate_config(config)
-            if not validation_result["valid"]:
-                logger.error(f"Config validation failed: {validation_result['errors']}")
-                return False
-
-            # Create backup of existing config
-            if self.config_file.exists():
-                backup_path = self.config_file.with_suffix('.json.bak')
-                with open(self.config_file, 'r') as f:
-                    backup_data = f.read()
-                with open(backup_path, 'w') as f:
-                    f.write(backup_data)
-
-            # Save new config
-            with open(self.config_file, 'w', encoding='utf-8') as f:
-                json.dump(config, f, indent=2, ensure_ascii=False)
-
-            logger.info(f"Config saved to {self.config_file}")
-            return True
-
-        except Exception as e:
-            logger.exception(f"Error saving config: {e}")
-            return False
-
-    def validate_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Validate configuration values.
-
-        Args:
-            config: Configuration dictionary to validate
-
-        Returns:
-            Dict with 'valid' boolean and list of 'errors'
-        """
-        try:
-            ConfigSchema.validate_config(config)
+            ConfigSchema.validate_config(config, allow_runtime_keys=False)
         except (TypeError, ValueError) as exc:
             return {"valid": False, "errors": [str(exc)]}
-
         return {"valid": True, "errors": []}
 
-    def get_defaults(self) -> Dict[str, Any]:
-        """
-        Get default configuration values.
+    def get_defaults(self) -> dict[str, Any]:
+        return dict(self.DEFAULT_CONFIG)
 
-        Returns:
-            Dictionary of default configuration values
-        """
-        return self.DEFAULT_CONFIG.copy()
-
-    def reset_to_defaults(self) -> bool:
-        """
-        Reset configuration to defaults.
-
-        Returns:
-            True if reset successful, False otherwise
-        """
+    def reset_to_defaults(self) -> dict[str, Any]:
         return self.save_config(self.DEFAULT_CONFIG)
 
-    def update_config(self, updates: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Update specific configuration values.
-
-        Args:
-            updates: Dictionary of values to update
-
-        Returns:
-            Dict with 'success' boolean and updated 'config' or 'errors'
-        """
-        try:
-            # Load current config
-            current_config = self.load_config()
-
-            # Apply updates
-            updated_config = current_config.copy()
-            updated_config.update(updates)
-
-            # Validate
-            validation = self.validate_config(updated_config)
-            if not validation["valid"]:
-                return {
-                    "success": False,
-                    "errors": validation["errors"]
-                }
-
-            # Save
-            if self.save_config(updated_config):
-                return {
-                    "success": True,
-                    "config": updated_config
-                }
-            else:
-                return {
-                    "success": False,
-                    "errors": ["Failed to save configuration"]
-                }
-
-        except Exception as e:
-            logger.exception("Error updating config")
+    def update_config(self, updates: Any) -> dict[str, Any]:
+        if not isinstance(updates, dict):
+            return {"success": False, "errors": ["Configuration update must be a JSON object"]}
+        unknown = sorted(set(updates) - ConfigSchema.USER_KEYS)
+        if unknown:
             return {
                 "success": False,
-                "errors": [str(e)]
+                "errors": [f"Unknown configuration field(s): {', '.join(unknown)}"],
             }
+        try:
+            current = self.load_config()
+            current.update(updates)
+            validated = self.save_config(current)
+            return {"success": True, "config": validated}
+        except (OSError, TypeError, ValueError) as exc:
+            return {"success": False, "errors": [str(exc)]}
 
-    def get_config_summary(self) -> Dict[str, Any]:
-        """
-        Get a summary of current configuration.
-
-        Returns:
-            Dictionary with config summary information
-        """
+    def get_config_summary(self) -> dict[str, Any]:
         config = self.load_config()
-
-        # Build channel filter summary
-        filter_mode = config.get("channel_filter_mode", "none")
-        channel_filter_summary = {
-            "mode": filter_mode
-        }
-
-        if filter_mode == "allowlist":
-            allowlist = config.get("channel_allowlist", [])
-            channel_filter_summary["allowlist"] = {
-                "enabled": True,
-                "count": len(allowlist) if allowlist else 0,
-                "channels": allowlist
-            }
-        elif filter_mode == "blocklist":
-            blocklist = config.get("channel_blocklist", [])
-            channel_filter_summary["blocklist"] = {
-                "enabled": True,
-                "count": len(blocklist) if blocklist else 0,
-                "channels": blocklist
-            }
-        elif config.get("channel_whitelist"):
-            # Legacy whitelist
-            channel_filter_summary["legacy_whitelist"] = {
-                "enabled": True,
-                "count": len(config["channel_whitelist"]),
-                "channels": config["channel_whitelist"]
-            }
-
         return {
             "playlist": {
                 "name": config["playlist_name"],
-                "visibility": config["playlist_visibility"]
+                "visibility": config["playlist_visibility"],
             },
             "filters": {
-                "min_duration_seconds": config["min_duration_seconds"],
-                "lookback_hours": config["lookback_hours"],
-                "max_videos": config["max_videos"],
-                "skip_live_content": config["skip_live_content"]
+                key: config[key]
+                for key in (
+                    "min_duration_seconds",
+                    "max_duration_seconds",
+                    "date_filter_mode",
+                    "lookback_hours",
+                    "date_filter_days",
+                    "date_filter_start",
+                    "date_filter_end",
+                    "max_videos",
+                    "skip_live_content",
+                    "keyword_filter_mode",
+                )
             },
-            "channel_filter": channel_filter_summary,
+            "channel_filter": {
+                "mode": config["channel_filter_mode"],
+                "allowlist": config["channel_allowlist"],
+                "blocklist": config["channel_blocklist"],
+            },
             "sleep_ranking": {
                 "ollama_base_url": config["ollama_base_url"],
                 "ollama_model": config["ollama_model"],
