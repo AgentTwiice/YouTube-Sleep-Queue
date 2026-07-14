@@ -1,5 +1,5 @@
 #!/bin/bash
-# Release automation script for yt-sub-playlist
+# Release automation script for YouTube Sleep Queue
 # Generates changelog and creates version tags using conventional commits
 
 set -e
@@ -26,7 +26,7 @@ if [ ! -d "node_modules" ]; then
 fi
 
 # Display menu
-echo -e "${GREEN}=== yt-sub-playlist Release Tool ===${NC}"
+echo -e "${GREEN}=== YouTube Sleep Queue Release Tool ===${NC}"
 echo ""
 echo "What would you like to do?"
 echo ""

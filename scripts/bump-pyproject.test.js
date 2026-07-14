@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const updater = require("./bump-pyproject.js");
 
 const SAMPLE = `[project]
-name = "yt-sub-playlist"
+name = "youtube-sleep-queue"
 version = "4.1.0"
 description = "x"
 

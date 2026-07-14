@@ -1,6 +1,6 @@
 # Fly.io runbook
 
-Run `yt-sub-playlist` as a daily scheduled machine on Fly.io. The machine wakes
+Run YouTube Sleep Queue as a daily scheduled machine on Fly.io. The machine wakes
 once per day, syncs your playlist, and exits. Fits the Fly.io free tier.
 
 > **No `fly deploy`** — this deploy path uses `fly machine run --schedule`,
@@ -92,7 +92,7 @@ fly machine run \
   --schedule daily \
   --restart no \
   --volume data:/data \
-  ghcr.io/keif/yt-sub-playlist:<version>
+  ghcr.io/agenttwiice/youtube-sleep-queue:<version>
 ```
 
 `--restart no` is important. Without it, Fly defaults to `on-failure` restart,
@@ -101,12 +101,10 @@ machine into a tight retry loop (and possibly burn through your YouTube API
 quota) instead of staying stopped until the next daily schedule.
 
 Replace `<version>` with the image tag you want to pin (e.g. `v4.1.0`). See
-[releases](https://github.com/keif/yt-sub-playlist/releases) for available
+[releases](https://github.com/AgentTwiice/YouTube-Sleep-Queue/releases) for available
 tags. Pinning to a specific version means you opt in to upgrades explicitly.
 
-> The image is published to `ghcr.io/keif/yt-sub-playlist` via issue #13. Until
-> that workflow is live, build and push the image manually or use a locally
-> pushed image reference.
+> Release tags are published to `ghcr.io/agenttwiice/youtube-sleep-queue` by the repository's container workflow. If the required tag is not available yet, build and push the image manually or use your own image reference.
 
 ---
 
@@ -192,5 +190,5 @@ Re-auth is the same local bootstrap flow repeated:
      --schedule daily \
      --restart no \
      --volume data:/data \
-     ghcr.io/keif/yt-sub-playlist:<version>
+     ghcr.io/agenttwiice/youtube-sleep-queue:<version>
    ```

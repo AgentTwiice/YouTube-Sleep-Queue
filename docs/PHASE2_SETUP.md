@@ -91,7 +91,7 @@ open index.html  # macOS
 ### "CLI tool not available"
 ```bash
 # Make sure you're in the right directory
-cd /path/to/playlist-from-subs/dashboard/backend
+cd /path/to/YouTube-Sleep-Queue/dashboard/backend
 uv run python run.py
 ```
 

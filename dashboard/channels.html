@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Channel Management - YouTube Playlist Dashboard</title>
     <link rel="stylesheet" href="styles.css">
-    <script src="https://unpkg.com/lucide@latest"></script>
     <style>
         .channels-container {
             max-width: 1200px;
@@ -307,7 +306,6 @@
     <div class="channels-container">
         <div class="header-section">
             <a href="config.html" class="back-link">
-                <i data-lucide="arrow-left"></i>
                 Back to Configuration
             </a>
         </div>
@@ -341,7 +339,6 @@
         <!-- Search -->
         <div class="search-section" id="searchSection" style="display: none;">
             <div class="search-input-wrapper">
-                <i data-lucide="search" class="search-icon"></i>
                 <input type="text" id="searchInput" class="search-input" placeholder="Search channels by name or ID...">
             </div>
         </div>
@@ -364,19 +361,14 @@
         <!-- Actions -->
         <div class="actions-section">
             <button class="btn btn-secondary" id="cancelBtn">
-                <i data-lucide="x"></i>
                 Cancel
             </button>
             <button class="btn btn-primary" id="saveBtn">
-                <i data-lucide="save"></i>
                 Save Changes
             </button>
         </div>
     </div>
 
     <script src="channels.js"></script>
-    <script>
-        lucide.createIcons();
-    </script>
 </body>
 </html>

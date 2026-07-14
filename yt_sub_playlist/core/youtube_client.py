@@ -1,837 +1,532 @@
-"""
-YouTube Data API v3 client wrapper.
+"""Typed, quota-aware YouTube Data API client."""
 
-This module provides a high-level interface to the YouTube Data API v3,
-with features specifically designed for playlist automation:
+from __future__ import annotations
 
-- Quota-optimized batched operations
-- Intelligent caching and duplicate detection  
-- Robust error handling and retry logic
-- Subscription and video management
-"""
-
-import json
 import logging
-import os
+import re
 import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import StrEnum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Iterable
 
 from googleapiclient.errors import HttpError
 
-from ..auth.oauth import get_authenticated_service
+from ..auth.oauth import YouTubeAuthenticationError, get_authenticated_service
+from ..config.quota_costs import get_quota_cost
+from .atomic_io import atomic_write_json, preserve_corrupt_file
+from .quota_log import read_quota_log, write_quota_log
 
 logger = logging.getLogger(__name__)
+_api_events: list[dict[str, Any]] = []
+_persisted_event_counts: dict[Path, int] = {}
 
-# Global API call counter for quota tracking
-api_call_counter: Dict[str, int] = {}
+
+class YouTubeClientError(RuntimeError):
+    """Base error for a YouTube API operation."""
 
 
-def track_api_call(method_name: str) -> None:
-    """
-    Track an API call for quota analysis.
-    
-    Args:
-        method_name: The YouTube API method name (e.g., "playlistItems.list")
-    """
-    global api_call_counter
-    api_call_counter[method_name] = api_call_counter.get(method_name, 0) + 1
-    logger.debug(f"API call tracked: {method_name} (count: {api_call_counter[method_name]})")
+class YouTubeQuotaError(YouTubeClientError):
+    """The daily or per-user quota is exhausted."""
+
+
+class YouTubeTransientError(YouTubeClientError):
+    """A retryable server or network failure occurred."""
+
+
+class YouTubeDiscoveryError(YouTubeClientError):
+    """Discovery could not produce a trustworthy result."""
+
+
+class ExistingPlaylistLookupError(YouTubeClientError):
+    """Existing membership could not be determined safely."""
+
+
+class PlaylistOperationError(YouTubeClientError):
+    """Playlist creation or validation failed."""
+
+
+class PlaylistAddOutcome(StrEnum):
+    ADDED = "added"
+    ALREADY_PRESENT = "already_present"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class DiscoveryIssue:
+    channel_id: str | None
+    channel_title: str
+    category: str
+    message: str
+
+
+@dataclass
+class DiscoveryResult:
+    videos: list[dict[str, Any]] = field(default_factory=list)
+    errors: list[DiscoveryIssue] = field(default_factory=list)
+
+    @property
+    def partial(self) -> bool:
+        return bool(self.errors)
+
+
+def track_api_call(method_name: str, result: str = "success") -> None:
+    """Record every attempted quota-consuming request, including failures."""
+    _api_events.append(
+        {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "method": method_name,
+            "quota_cost": get_quota_cost(method_name),
+            "result": result,
+        }
+    )
 
 
 def dump_api_call_log(path: Path) -> None:
-    """
-    Write the API call counter to a JSON file.
-    
-    Args:
-        path: Path where to save the API call log
-    """
-    global api_call_counter
-    
-    try:
-        # Ensure parent directory exists
-        path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Write the counter to JSON file
-        with open(path, 'w') as f:
-            json.dump(api_call_counter, f, indent=2)
-        
-        total_calls = sum(api_call_counter.values())
-        logger.info(f"API call log dumped to {path} ({total_calls} total calls tracked)")
-        
-    except Exception as e:
-        logger.error(f"Failed to dump API call log to {path}: {e}")
+    """Append this process's new events to the shared versioned daily log."""
+    resolved = path.resolve()
+    offset = min(_persisted_event_counts.get(resolved, 0), len(_api_events))
+    new_events = _api_events[offset:]
+    if not new_events:
+        return
+    existing = read_quota_log(path)
+    today = datetime.now(timezone.utc).date().isoformat()
+    current_events = [
+        event
+        for event in existing["events"]
+        if event.get("timestamp") is None or str(event["timestamp"]).startswith(today)
+    ]
+    generated_at = datetime.now(timezone.utc).isoformat()
+    write_quota_log(path, current_events + new_events, generated_at)
+    _persisted_event_counts[resolved] = len(_api_events)
 
 
 def parse_duration_to_seconds(duration: str) -> int:
-    """
-    Parse ISO 8601 duration format (PT4M13S) to seconds.
-    
-    Args:
-        duration: ISO 8601 duration string (e.g., "PT4M13S", "PT1H2M30S")
-        
-    Returns:
-        Total duration in seconds
-    """
-    import re
-    
-    if not duration or not duration.startswith('PT'):
+    if not isinstance(duration, str) or not duration.startswith("PT"):
         return 0
-    
-    # Remove PT prefix and extract time components
-    time_part = duration[2:]
-    
-    # Initialize components
-    hours = minutes = seconds = 0
-    
-    # Extract hours
-    hours_match = re.search(r'(\d+)H', time_part)
-    if hours_match:
-        hours = int(hours_match.group(1))
-    
-    # Extract minutes
-    minutes_match = re.search(r'(\d+)M', time_part)
-    if minutes_match:
-        minutes = int(minutes_match.group(1))
-    
-    # Extract seconds
-    seconds_match = re.search(r'(\d+)S', time_part)
-    if seconds_match:
-        seconds = int(seconds_match.group(1))
-    
-    total_seconds = hours * 3600 + minutes * 60 + seconds
-    return total_seconds
+    values = {
+        unit: int(match.group(1)) if (match := re.search(rf"(\d+){unit}", duration)) else 0
+        for unit in ("H", "M", "S")
+    }
+    return values["H"] * 3600 + values["M"] * 60 + values["S"]
+
+
+def _published_at(item: dict[str, Any]) -> datetime | None:
+    value = item.get("snippet", {}).get("publishedAt")
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 class YouTubeClient:
-    """
-    Wrapper for YouTube Data API v3 with methods specific to playlist automation.
-    
-    Features:
-    - Quota-optimized operations with batching
-    - Intelligent duplicate detection and caching
-    - Robust error handling with retry logic
-    - Subscription and playlist management
-    """
+    """Small high-level client with normalized results and explicit failures."""
 
-    def __init__(self, data_dir: str = "data"):
-        """
-        Initialize YouTube API client.
-        
-        Args:
-            data_dir: Directory for storing cache files and data
-        """
-        self.service = get_authenticated_service()
+    def __init__(self, data_dir: str | Path = "data", service: Any | None = None):
+        self.service = service if service is not None else get_authenticated_service()
         self.quota_exceeded = False
-        self.data_dir = data_dir
-        
-        # Ensure data directory exists
-        os.makedirs(data_dir, exist_ok=True)
-        os.makedirs(os.path.join(data_dir, "playlist_cache"), exist_ok=True)
+        self.data_dir = Path(data_dir)
+        self.playlist_cache_dir = self.data_dir / "playlist_cache"
+        self.playlist_cache_dir.mkdir(parents=True, exist_ok=True)
 
-    def fetch_existing_playlist_items(self, playlist_id: str) -> Set[str]:
-        """
-        Fetch all existing video IDs from a playlist with disk-based caching.
-        
-        Uses disk cache with 12-hour TTL to avoid repeated API calls.
-        Supports pagination for playlists with >50 videos.
-        
-        Args:
-            playlist_id: Target playlist ID to check for existing videos
-            
-        Returns:
-            Set of video IDs currently in the playlist
-        """
-        cache_file = os.path.join(
-            self.data_dir, "playlist_cache", f"existing_playlist_items_{playlist_id}.json"
-        )
-        cache_ttl_hours = 12
-        
-        # Check if cache exists and is still valid
-        if os.path.exists(cache_file):
-            try:
-                cache_age = time.time() - os.path.getmtime(cache_file)
-                if cache_age < cache_ttl_hours * 3600:  # Convert hours to seconds
-                    with open(cache_file, 'r', encoding='utf-8') as f:
-                        cached_data = json.load(f)
-                        video_ids = set(cached_data.get('video_ids', []))
-                        logger.info(f"Using cached playlist items ({len(video_ids)} videos, {cache_age/3600:.1f}h old)")
-                        return video_ids
-            except (json.JSONDecodeError, OSError) as e:
-                logger.warning(f"Failed to read playlist cache: {e}")
-                # Continue to fresh fetch
-        
-        # Fetch fresh data from API
-        logger.info(f"Fetching existing playlist items for {playlist_id}")
-        video_ids = set()
-        next_page_token = None
-        page_count = 0
-        
+    def _execute(self, request: Any, method: str) -> dict[str, Any]:
         try:
-            while True:
-                page_count += 1
-                request = self.service.playlistItems().list(
-                    part='contentDetails',
-                    playlistId=playlist_id,
-                    maxResults=50,
-                    pageToken=next_page_token
-                )
-                
-                response = request.execute()
-                track_api_call("playlistItems.list")
-                
-                # Extract video IDs from this page
-                for item in response.get('items', []):
-                    content_details = item.get('contentDetails', {})
-                    video_id = content_details.get('videoId')
-                    if video_id:
-                        video_ids.add(video_id)
-                
-                # Check for more pages
-                next_page_token = response.get('nextPageToken')
-                if not next_page_token:
-                    break
-                    
-                # Safety check to avoid infinite loops
-                if page_count > 100:  # Max 5000 videos
-                    logger.warning(f"Reached page limit fetching playlist items")
-                    break
-            
-            logger.info(f"Fetched {len(video_ids)} existing videos from playlist ({page_count} API pages)")
-            
-            # Cache the results
-            try:
-                cache_data = {
-                    'video_ids': list(video_ids),
-                    'fetched_at': time.time(),
-                    'playlist_id': playlist_id
-                }
-                with open(cache_file, 'w', encoding='utf-8') as f:
-                    json.dump(cache_data, f, indent=2)
-                logger.debug(f"Cached playlist items to {cache_file}")
-            except OSError as e:
-                logger.warning(f"Failed to cache playlist items: {e}")
-                
-        except HttpError as e:
-            if e.resp.status == 403 and "quotaExceeded" in str(e):
-                self.quota_exceeded = True
-                logger.warning("YouTube API quota exceeded while fetching playlist items.")
-            else:
-                logger.error(f"Failed to fetch playlist items: {e}")
-            return set()  # Return empty set on error
-        except Exception as e:
-            logger.error(f"Unexpected error fetching playlist items: {e}")
-            return set()
-        
-        return video_ids
-
-    def get_subscription_activity(
-        self, published_after: str, max_results: int = 50
-    ) -> List[Dict[str, Any]]:
-        """
-        Get recent videos from subscribed channels using the activities endpoint.
-        This is more efficient than fetching each channel individually.
-
-        Args:
-            published_after: RFC 3339 timestamp for filtering recent videos
-            max_results: Maximum number of activities to fetch
-
-        Returns:
-            List of video data dictionaries
-        """
-        videos = []
-        
-        try:
-            request = self.service.activities().list(
-                part="snippet,contentDetails",
-                mine=True,
-                publishedAfter=published_after,
-                maxResults=max_results
-            )
-            
             response = request.execute()
-            track_api_call("activities.list")
-            activity_map = {}
-            video_ids = []
+            if not isinstance(response, dict):
+                raise YouTubeClientError(f"{method} returned a non-object response")
+            track_api_call(method, "success")
+            return response
+        except HttpError as exc:
+            error = self._classify_http_error(method, exc)
+            track_api_call(method, error.__class__.__name__)
+            raise error from exc
+        except YouTubeClientError:
+            track_api_call(method, "invalid_response")
+            raise
+        except Exception as exc:
+            track_api_call(method, "transient_failure")
+            raise YouTubeTransientError(f"{method} failed: {exc}") from exc
 
-            # Extract upload activities
-            for item in response.get("items", []):
-                if item["snippet"]["type"] == "upload":
-                    video_id = item["contentDetails"]["upload"]["videoId"]
-                    video_ids.append(video_id)
-                    activity_map[video_id] = item
+    def _classify_http_error(
+        self, method: str, exc: HttpError
+    ) -> YouTubeClientError | YouTubeAuthenticationError:
+        status = int(getattr(exc.resp, "status", 0) or 0)
+        text = str(exc)
+        lowered = text.lower()
+        if status in {403, 429} and any(
+            reason in lowered for reason in ("quota", "ratelimit", "dailylimit")
+        ):
+            self.quota_exceeded = True
+            return YouTubeQuotaError(f"YouTube quota exhausted during {method}")
+        if status in {401} or (
+            status == 403
+            and any(
+                reason in lowered
+                for reason in ("autherror", "insufficientpermissions", "forbidden")
+            )
+        ):
+            return YouTubeAuthenticationError(f"YouTube authorization failed during {method}")
+        if status in {408, 429, 500, 502, 503, 504}:
+            return YouTubeTransientError(
+                f"Temporary YouTube failure during {method} (HTTP {status})"
+            )
+        return YouTubeClientError(f"YouTube request {method} failed (HTTP {status or 'unknown'})")
 
-            if not video_ids:
-                logger.info("No upload activities found in recent subscriptions")
-                return videos
+    def get_channels(self) -> list[dict[str, str]]:
+        """Return normalized subscribed channel records for public consumers."""
+        normalized: list[dict[str, str]] = []
+        token: str | None = None
+        seen: set[str] = set()
+        while True:
+            response = self._execute(
+                self.service.subscriptions().list(
+                    part="snippet", mine=True, maxResults=50, pageToken=token
+                ),
+                "subscriptions.list",
+            )
+            items = response.get("items", [])
+            if not isinstance(items, list):
+                raise YouTubeDiscoveryError("subscriptions.list returned invalid items")
+            for item in items:
+                try:
+                    snippet = item["snippet"]
+                    channel_id = snippet["resourceId"]["channelId"]
+                    title = snippet["title"]
+                except (KeyError, TypeError) as exc:
+                    raise YouTubeDiscoveryError("A subscription was missing channel data") from exc
+                if channel_id not in seen:
+                    normalized.append({"channel_id": str(channel_id), "title": str(title)})
+                    seen.add(channel_id)
+            token = response.get("nextPageToken")
+            if not token:
+                break
+            if len(normalized) >= 2_000:
+                raise YouTubeDiscoveryError("Subscription pagination exceeded the safety limit")
+        return normalized
 
-            # Batch fetch video details including duration
-            videos_details = self._get_videos_details(video_ids)
-
-            # Combine activity data with video details
-            for video_id, details in videos_details.items():
-                if video_id in activity_map:
-                    activity = activity_map[video_id]
-
-                    video_data = {
-                        "video_id": video_id,
-                        "title": activity["snippet"]["title"],
-                        "channel_id": activity["snippet"]["channelId"],
-                        "channel_title": activity["snippet"]["channelTitle"],
-                        "published_at": activity["snippet"]["publishedAt"],
-                        "duration_seconds": parse_duration_to_seconds(details["duration"]),
-                        "live_broadcast": details["liveBroadcastContent"]
-                    }
-                    videos.append(video_data)
-
-            logger.info(f"Found {len(videos)} recent subscription videos")
-            return videos
-
-        except HttpError as e:
-            if e.resp.status == 403 and "quotaExceeded" in str(e):
-                self.quota_exceeded = True
-                logger.error("YouTube API quota exceeded while fetching subscription activities.")
-            else:
-                logger.error(f"YouTube API error fetching subscription activities: {e}")
-            return []
-        except Exception as e:
-            logger.error(f"Unexpected error fetching subscription activities: {e}")
-            return []
+    def search_channels(self, query: str) -> list[dict[str, str]]:
+        needle = query.strip().casefold()
+        channels = self.get_channels()
+        if not needle:
+            return channels
+        return [
+            channel
+            for channel in channels
+            if needle in channel["title"].casefold() or needle in channel["channel_id"].casefold()
+        ]
 
     def get_recent_uploads_from_subscriptions(
-        self, published_after: str, max_per_channel: int = 5
-    ) -> List[Dict[str, Any]]:
-        """
-        Get recent uploads from all subscribed channels using optimized uploads playlist lookup.
-        
-        This method is quota-optimized (~98% reduction vs search API) by:
-        1. Fetching subscriptions list (1 unit)
-        2. Getting channel uploads playlist IDs (1 unit per ~50 channels)
-        3. Fetching recent videos from uploads playlists (1 unit per ~50 videos)
-        4. Batch fetching video details (1 unit per ~50 videos)
-
-        Args:
-            published_after: RFC 3339 timestamp for filtering recent videos  
-            max_per_channel: Maximum videos to fetch per channel
-
-        Returns:
-            List of video data dictionaries
-        """
-        videos = []
-
-        try:
-            # Step 1: Get all subscribed channels
-            subscriptions = self._get_all_subscriptions()
-            
-            if not subscriptions:
-                logger.info("No subscriptions found")
-                return videos
-
-            logger.info(f"Processing {len(subscriptions)} subscribed channels")
-
-            # Step 2: Process each channel's uploads playlist
-            for subscription in subscriptions:
-                channel_id = subscription["snippet"]["resourceId"]["channelId"]
-                channel_title = subscription["snippet"]["title"]
-                
-                # Get the uploads playlist ID for this channel
-                uploads_playlist_id = self._get_uploads_playlist_id(channel_id, channel_title)
-                if not uploads_playlist_id:
-                    continue
-
-                # Get recent videos from the uploads playlist
-                channel_videos = self._get_recent_videos_from_uploads_playlist(
-                    uploads_playlist_id, channel_title, max_per_channel, published_after
-                )
-                
-                videos.extend(channel_videos)
-
-            logger.info(f"Found {len(videos)} total recent videos from subscriptions")
-            return videos
-
-        except HttpError as e:
-            if e.resp.status == 403 and "quotaExceeded" in str(e):
-                self.quota_exceeded = True
-                logger.error("YouTube API quota exceeded while fetching subscription uploads.")
-            else:
-                logger.error(f"YouTube API error fetching subscription uploads: {e}")
-            return []
-        except Exception as e:
-            logger.error(f"Unexpected error fetching subscription uploads: {e}")
-            return []
-
-    def _get_all_subscriptions(self) -> List[Dict[str, Any]]:
-        """Get all user subscriptions with pagination support."""
-        subscriptions = []
-        next_page_token = None
-        
-        try:
-            while True:
-                request = self.service.subscriptions().list(
-                    part="snippet",
-                    mine=True,
-                    maxResults=50,
-                    pageToken=next_page_token
-                )
-                
-                response = request.execute()
-                track_api_call("subscriptions.list")
-                subscriptions.extend(response.get("items", []))
-                
-                next_page_token = response.get("nextPageToken")
-                if not next_page_token:
-                    break
-                    
-                # Safety check
-                if len(subscriptions) > 1000:
-                    logger.warning("Reached subscription limit of 1000")
-                    break
-            
-            logger.debug(f"Retrieved {len(subscriptions)} subscriptions")
-            return subscriptions
-            
-        except HttpError as e:
-            if e.resp.status == 403 and "quotaExceeded" in str(e):
-                self.quota_exceeded = True
-                logger.error("YouTube API quota exceeded while fetching subscriptions.")
-            else:
-                logger.error(f"YouTube API error fetching subscriptions: {e}")
-            return []
-
-    def _get_uploads_playlist_id(self, channel_id: str, channel_title: str) -> Optional[str]:
-        """Get the uploads playlist ID for a specific channel."""
-        try:
-            request = self.service.channels().list(
-                part="contentDetails",
-                id=channel_id
-            )
-            
-            response = request.execute()
-            track_api_call("channels.list")
-            items = response.get("items", [])
-            
-            if not items:
-                logger.debug(f"No channel data found for {channel_title}")
-                return None
-                
-            uploads_playlist_id = items[0]["contentDetails"]["relatedPlaylists"]["uploads"]
-            logger.debug(f"Got uploads playlist {uploads_playlist_id} for {channel_title}")
-            return uploads_playlist_id
-            
-        except HttpError as e:
-            if e.resp.status == 403 and "quotaExceeded" in str(e):
-                self.quota_exceeded = True
-                logger.warning("YouTube API quota exceeded while fetching channel details.")
-            else:
-                logger.warning(f"YouTube API error fetching channel {channel_title}: {e}")
-            return None
-        except Exception as e:
-            logger.warning(f"Unexpected error fetching channel {channel_title}: {e}")
-            return None
-
-    def _get_recent_videos_from_uploads_playlist(
-        self, uploads_playlist_id: str, channel_title: str, max_results: int, published_after: str
-    ) -> List[Dict[str, Any]]:
-        """Get recent videos from a channel's uploads playlist."""
-        videos = []
-        
-        try:
-            # Get recent playlist items (uploads are ordered by upload time)
-            playlist_items = self._get_playlist_items(
-                uploads_playlist_id, channel_title, max_results
-            )
-
-            if not playlist_items:
-                logger.debug(f"No recent videos found for {channel_title}")
-                return videos
-
-            # Step 3: Extract video IDs and get detailed information
-            video_ids = [item["contentDetails"]["videoId"] for item in playlist_items]
-            video_details = self._get_videos_details(video_ids)
-
-            # Step 4: Filter by published date and combine with video details
-            from datetime import datetime
-            published_after_dt = datetime.fromisoformat(published_after.replace('Z', '+00:00'))
-
-            for item in playlist_items:
-                video_id = item["contentDetails"]["videoId"]
-                snippet = item["snippet"]
-                
-                # Filter by publish date (playlist items are ordered by upload date, 
-                # but we need to check the actual publish date)
-                published_at = datetime.fromisoformat(snippet["publishedAt"].replace('Z', '+00:00'))
-                if published_at <= published_after_dt:
-                    continue  # Skip older videos
-                
-                # Get video details if available
-                if video_id not in video_details:
-                    logger.debug(f"No details found for video {video_id}")
-                    continue
-                    
-                details = video_details[video_id]
-                
-                video_data = {
-                    "video_id": video_id,
-                    "title": snippet["title"],
-                    "channel_id": snippet["channelId"],
-                    "channel_title": channel_title,
-                    "published_at": snippet["publishedAt"],
-                    "duration_seconds": parse_duration_to_seconds(details["duration"]),
-                    "live_broadcast": details["liveBroadcastContent"]
-                }
-                videos.append(video_data)
-
-            if videos:
-                logger.debug(f"Found {len(videos)} recent videos from {channel_title}")
-
-            return videos
-
-        except Exception as e:
-            logger.warning(f"Error processing uploads for {channel_title}: {e}")
-            return []
-
-    def _get_playlist_items(
-        self, uploads_playlist_id: str, channel_title: str, max_results: int
-    ) -> List[Dict[str, Any]]:
-        """Get playlist items with error handling."""
-        try:
-            request = self.service.playlistItems().list(
-                part="snippet,contentDetails",
-                playlistId=uploads_playlist_id,
-                maxResults=min(max_results, 50)  # API limit is 50
-            )
-            
-            response = request.execute()
-            track_api_call("playlistItems.list")
-            return response.get("items", [])
-            
-        except HttpError as e:
-            if e.resp.status == 403 and "quotaExceeded" in str(e):
-                self.quota_exceeded = True
-                logger.warning(f"YouTube API quota exceeded while fetching playlist items for {channel_title}.")
-            else:
-                logger.warning(f"YouTube API error fetching playlist items for {channel_title}: {e}")
-            return []
-
-    def _get_videos_details_batch(self, video_ids: List[str]) -> Dict[str, Dict[str, Any]]:
-        """
-        Fetch video details for a batch of up to 50 video IDs with retry logic.
-        
-        Args:
-            video_ids: List of YouTube video IDs (max 50)
-            
-        Returns:
-            Dict mapping video_id to details dict with 'duration' and 'liveBroadcastContent' keys
-        """
-        if not video_ids or len(video_ids) > 50:
-            logger.warning(f"Invalid batch size: {len(video_ids)}. Expected 1-50 video IDs.")
-            return {}
-            
-        max_retries = 1
-        for attempt in range(max_retries + 1):
-            try:
-                request = self.service.videos().list(
-                    part="contentDetails,snippet", 
-                    id=",".join(video_ids)
-                )
-                
-                response = request.execute()
-                track_api_call("videos.list")
-                batch_details = {}
-                
-                for item in response.get("items", []):
-                    video_id = item["id"]
-                    duration = item["contentDetails"]["duration"]
-                    live_broadcast_content = item["snippet"].get("liveBroadcastContent", "none")
-                    batch_details[video_id] = {
-                        "duration": duration,
-                        "liveBroadcastContent": live_broadcast_content
-                    }
-                
-                # Log any missing videos from the batch
-                missing_videos = set(video_ids) - set(batch_details.keys())
-                if missing_videos:
-                    logger.warning(f"Videos not found or unavailable: {list(missing_videos)}")
-                
-                return batch_details
-                
-            except HttpError as e:
-                if e.resp.status == 403 and "quotaExceeded" in str(e):
-                    self.quota_exceeded = True
-                    logger.error("YouTube API quota exceeded while fetching video details.")
-                    logger.error("Try again after 12AM Pacific Time.")
-                    return {}
-                elif attempt < max_retries:
-                    logger.warning(f"YouTube API error fetching video batch (attempt {attempt + 1}/{max_retries + 1}): {e}")
-                    time.sleep(1)  # Brief delay before retry
-                    continue
-                else:
-                    logger.error(f"YouTube API error fetching video details after {max_retries + 1} attempts: {e}")
-                    return {}
-            except Exception as e:
-                if attempt < max_retries:
-                    logger.warning(f"Unexpected error fetching video batch (attempt {attempt + 1}/{max_retries + 1}): {e}")
-                    time.sleep(1)  # Brief delay before retry
-                    continue
-                else:
-                    logger.error(f"Unexpected error fetching video details after {max_retries + 1} attempts: {e}")
-                    return {}
-        
-        return {}
-
-    def _get_videos_details(self, video_ids: List[str]) -> Dict[str, Dict[str, Any]]:
-        """
-        Fetch video details including duration and live broadcast status for multiple video IDs.
-        
-        Efficiently batches requests to use up to 50 video IDs per API call, dramatically 
-        reducing quota usage compared to individual requests.
-
-        Args:
-            video_ids: List of YouTube video IDs
-
-        Returns:
-            Dict mapping video_id to details dict with 'duration' and 'liveBroadcastContent' keys
-        """
-        if not video_ids:
-            return {}
-
-        # Remove duplicates while preserving order
-        unique_video_ids = list(dict.fromkeys(video_ids))
-        
-        if len(unique_video_ids) != len(video_ids):
-            logger.debug(f"Removed {len(video_ids) - len(unique_video_ids)} duplicate video IDs")
-
-        details = {}
-        batch_size = 50
-        total_batches = (len(unique_video_ids) + batch_size - 1) // batch_size
-        failed_batches = 0
-        
-        logger.info(f"Fetching details for {len(unique_video_ids)} videos using {total_batches} batched API calls")
-
-        for i in range(0, len(unique_video_ids), batch_size):
-            # Stop processing if quota was exceeded
+        self,
+        published_after: str,
+        max_per_channel: int = 5,
+        max_total: int | None = None,
+    ) -> DiscoveryResult:
+        channels = self.get_channels()
+        if not channels:
+            return DiscoveryResult()
+        uploads, issues = self._get_upload_playlists(channels)
+        item_records: list[tuple[dict[str, str], dict[str, Any]]] = []
+        for channel in channels:
             if self.quota_exceeded:
-                logger.warning(f"Skipping remaining video detail batches due to quota exceeded")
-                break
-                
-            batch = unique_video_ids[i:i + batch_size]
-            batch_num = (i // batch_size) + 1
-            
-            logger.debug(f"Processing video batch {batch_num}/{total_batches} ({len(batch)} videos)")
-            
-            batch_details = self._get_videos_details_batch(batch)
-            
-            if batch_details:
-                details.update(batch_details)
-                logger.debug(f"Batch {batch_num}: fetched {len(batch_details)} video details")
-            else:
-                failed_batches += 1
-                logger.warning(f"Batch {batch_num}: failed to fetch video details")
+                raise YouTubeQuotaError("YouTube quota exhausted during discovery")
+            playlist_id = uploads.get(channel["channel_id"])
+            if not playlist_id:
+                continue
+            try:
+                response = self._execute(
+                    self.service.playlistItems().list(
+                        part="snippet,contentDetails",
+                        playlistId=playlist_id,
+                        maxResults=min(max_per_channel, 50),
+                    ),
+                    "playlistItems.list",
+                )
+                items = response.get("items", [])
+                if not isinstance(items, list):
+                    raise YouTubeClientError("playlistItems.list returned invalid items")
+                item_records.extend((channel, item) for item in items)
+            except YouTubeQuotaError:
+                raise
+            except YouTubeAuthenticationError:
+                raise
+            except YouTubeClientError as exc:
+                issues.append(self._issue(channel, exc))
 
-        successful_videos = len(details)
-        failed_videos = len(unique_video_ids) - successful_videos
-        quota_used = total_batches - failed_batches  # Each successful batch = 1 quota unit
-        quota_saved = len(unique_video_ids) - quota_used  # vs individual calls
-        
-        logger.info(f"Video details summary: {successful_videos} fetched, {failed_videos} failed, "
-                   f"{quota_used} quota units used (saved {quota_saved} units vs individual calls)")
-        
-        if failed_batches > 0:
-            logger.warning(f"{failed_batches}/{total_batches} batches failed")
-            
+        boundary = datetime.fromisoformat(published_after.replace("Z", "+00:00"))
+        item_records = [
+            record
+            for record in item_records
+            if (published := _published_at(record[1])) is not None and published > boundary
+        ]
+        item_records.sort(key=lambda record: _published_at(record[1]) or boundary, reverse=True)
+        if max_total is not None:
+            item_records = item_records[:max_total]
+
+        video_ids: list[str] = []
+        for _, item in item_records:
+            video_id = item.get("contentDetails", {}).get("videoId")
+            if isinstance(video_id, str):
+                video_ids.append(video_id)
+        try:
+            details = self._get_videos_details(video_ids)
+        except YouTubeQuotaError:
+            raise
+        except YouTubeAuthenticationError:
+            raise
+        except YouTubeClientError as exc:
+            if not issues:
+                raise YouTubeDiscoveryError(str(exc)) from exc
+            issues.append(DiscoveryIssue(None, "video details", exc.__class__.__name__, str(exc)))
+            details = {}
+
+        videos: list[dict[str, Any]] = []
+        for channel, item in item_records:
+            try:
+                snippet = item["snippet"]
+                video_id = item["contentDetails"]["videoId"]
+                published_at = datetime.fromisoformat(snippet["publishedAt"].replace("Z", "+00:00"))
+                detail = details[video_id]
+            except (KeyError, TypeError, ValueError):
+                continue
+            if published_at <= boundary:
+                continue
+            videos.append(
+                {
+                    "video_id": video_id,
+                    "title": str(snippet.get("title", "")),
+                    "channel_id": channel["channel_id"],
+                    "channel_title": channel["title"],
+                    "published_at": snippet["publishedAt"],
+                    "duration_seconds": parse_duration_to_seconds(detail["duration"]),
+                    "live_broadcast": detail["liveBroadcastContent"],
+                    "description": detail.get("description", ""),
+                }
+            )
+        if not videos and issues and len(issues) >= len(channels):
+            raise YouTubeDiscoveryError("Discovery failed for every subscribed channel")
+        return DiscoveryResult(videos, issues)
+
+    def _get_upload_playlists(
+        self, channels: list[dict[str, str]]
+    ) -> tuple[dict[str, str], list[DiscoveryIssue]]:
+        uploads: dict[str, str] = {}
+        issues: list[DiscoveryIssue] = []
+        by_id = {channel["channel_id"]: channel for channel in channels}
+        ids = list(by_id)
+        for offset in range(0, len(ids), 50):
+            batch = ids[offset : offset + 50]
+            try:
+                response = self._execute(
+                    self.service.channels().list(part="contentDetails", id=",".join(batch)),
+                    "channels.list",
+                )
+            except (YouTubeQuotaError, YouTubeAuthenticationError):
+                raise
+            except YouTubeClientError as exc:
+                issues.extend(self._issue(by_id[channel_id], exc) for channel_id in batch)
+                continue
+            returned: set[str] = set()
+            for item in response.get("items", []):
+                try:
+                    channel_id = item["id"]
+                    playlist_id = item["contentDetails"]["relatedPlaylists"]["uploads"]
+                except (KeyError, TypeError):
+                    continue
+                uploads[channel_id] = playlist_id
+                returned.add(channel_id)
+            for channel_id in set(batch) - returned:
+                issues.append(
+                    DiscoveryIssue(
+                        channel_id,
+                        by_id[channel_id]["title"],
+                        "missing_channel",
+                        "No uploads playlist was returned",
+                    )
+                )
+        return uploads, issues
+
+    @staticmethod
+    def _issue(channel: dict[str, str], error: Exception) -> DiscoveryIssue:
+        return DiscoveryIssue(
+            channel["channel_id"], channel["title"], error.__class__.__name__, str(error)[:500]
+        )
+
+    def _get_videos_details(self, video_ids: Iterable[str]) -> dict[str, dict[str, str]]:
+        unique = list(dict.fromkeys(video_ids))
+        details: dict[str, dict[str, str]] = {}
+        for offset in range(0, len(unique), 50):
+            if self.quota_exceeded:
+                raise YouTubeQuotaError("YouTube quota exhausted while fetching video details")
+            batch = unique[offset : offset + 50]
+            if not batch:
+                continue
+            response = self._execute(
+                self.service.videos().list(part="contentDetails,snippet", id=",".join(batch)),
+                "videos.list",
+            )
+            for item in response.get("items", []):
+                try:
+                    details[item["id"]] = {
+                        "duration": item["contentDetails"]["duration"],
+                        "liveBroadcastContent": item["snippet"].get("liveBroadcastContent", "none"),
+                        "description": item["snippet"].get("description", ""),
+                    }
+                except (KeyError, TypeError):
+                    continue
         return details
 
-    def get_or_create_playlist(
-        self,
-        playlist_id: Optional[str],
-        playlist_name: str,
-        privacy_status: str = "unlisted",
-    ) -> Optional[str]:
-        """
-        Get existing playlist by ID or create a new one.
-        
-        Args:
-            playlist_id: Existing playlist ID (if None, creates new playlist)
-            playlist_name: Name for new playlist
-            privacy_status: Privacy setting ('private', 'unlisted', 'public')
-            
-        Returns:
-            Playlist ID if successful, None if failed
-        """
-        if playlist_id:
-            # Verify the playlist exists and is accessible
+    def _get_videos_details_batch(self, video_ids: list[str]) -> dict[str, dict[str, str]]:
+        """Compatibility wrapper for callers that already provide one valid batch."""
+        if not 1 <= len(video_ids) <= 50:
+            raise ValueError("video_ids batch must contain between 1 and 50 IDs")
+        response = self._execute(
+            self.service.videos().list(part="contentDetails,snippet", id=",".join(video_ids)),
+            "videos.list",
+        )
+        details: dict[str, dict[str, str]] = {}
+        for item in response.get("items", []):
             try:
-                request = self.service.playlists().list(
-                    part="snippet", id=playlist_id
-                )
-                response = request.execute()
-                track_api_call("playlists.list")
-
-                if response.get("items"):
-                    playlist_title = response["items"][0]["snippet"]["title"]
-                    logger.info(f"Using existing playlist: {playlist_title} ({playlist_id})")
-                    return playlist_id
-                else:
-                    logger.error(f"Playlist {playlist_id} not found or not accessible")
-                    return None
-
-            except HttpError as e:
-                if e.resp.status == 403 and "quotaExceeded" in str(e):
-                    self.quota_exceeded = True
-                    logger.error("YouTube API quota exceeded while checking playlist.")
-                    return None
-                else:
-                    logger.error(f"Error checking playlist {playlist_id}: {e}")
-                    return None
-
-        # Create new playlist
-        try:
-            playlist_body = {
-                "snippet": {
-                    "title": playlist_name,
-                    "description": f"Automatically curated playlist created by yt-sub-playlist",
-                },
-                "status": {"privacyStatus": privacy_status},
-            }
-
-            request = self.service.playlists().insert(
-                part="snippet,status", body=playlist_body
-            )
-            
-            response = request.execute()
-            track_api_call("playlists.insert")
-            new_playlist_id = response["id"]
-            
-            logger.info(f"Created new playlist: {playlist_name} ({new_playlist_id})")
-            return new_playlist_id
-
-        except HttpError as e:
-            if e.resp.status == 403 and "quotaExceeded" in str(e):
-                self.quota_exceeded = True
-                logger.error("YouTube API quota exceeded while creating playlist.")
-            else:
-                logger.error(f"Failed to create playlist: {e}")
-            return None
-        except Exception as e:
-            logger.error(f"Unexpected error creating playlist: {e}")
-            return None
-
-    def add_video_to_playlist(self, playlist_id: str, video_id: str) -> bool:
-        """
-        Add a single video to a playlist.
-
-        Args:
-            playlist_id: Target playlist ID
-            video_id: YouTube video ID to add
-
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            playlist_item_body = {
-                "snippet": {
-                    "playlistId": playlist_id,
-                    "resourceId": {"kind": "youtube#video", "videoId": video_id},
+                details[item["id"]] = {
+                    "duration": item["contentDetails"]["duration"],
+                    "liveBroadcastContent": item["snippet"].get("liveBroadcastContent", "none"),
+                    "description": item["snippet"].get("description", ""),
                 }
-            }
+            except (KeyError, TypeError):
+                continue
+        return details
 
-            request = self.service.playlistItems().insert(
-                part="snippet", body=playlist_item_body
-            )
+    def fetch_existing_playlist_items(self, playlist_id: str) -> set[str]:
+        cache_file = self.playlist_cache_dir / f"existing_playlist_items_{playlist_id}.json"
+        if cache_file.exists() and time.time() - cache_file.stat().st_mtime < 12 * 3600:
+            try:
+                import json
 
-            response = request.execute()
-            track_api_call("playlistItems.insert")
-            logger.debug(f"Added video {video_id} to playlist {playlist_id}")
-            return True
-
-        except HttpError as e:
-            # Handle common errors gracefully
-            if e.resp.status == 409:
-                logger.debug(f"Video {video_id} already in playlist {playlist_id}")
-                return True  # Consider duplicates as success
-            elif e.resp.status == 403 and "quotaExceeded" in str(e):
-                self.quota_exceeded = True
-                logger.warning("YouTube API quota exceeded while adding videos to playlist.")
-                logger.warning("Try again after 12AM Pacific Time.")
-                return False
+                cached = json.loads(cache_file.read_text(encoding="utf-8"))
+                if not isinstance(cached, dict) or not isinstance(cached.get("video_ids"), list):
+                    raise ValueError("invalid playlist cache shape")
+                if not all(isinstance(value, str) for value in cached["video_ids"]):
+                    raise ValueError("playlist cache IDs must be strings")
+                return set(cached["video_ids"])
+            except (
+                OSError,
+                UnicodeDecodeError,
+                ValueError,
+                TypeError,
+                json.JSONDecodeError,
+            ) as exc:
+                backup = preserve_corrupt_file(cache_file)
+                raise ExistingPlaylistLookupError(
+                    f"Existing-item cache is corrupt; preserved it as {backup}"
+                ) from exc
+        video_ids: set[str] = set()
+        token: str | None = None
+        try:
+            for _ in range(100):
+                response = self._execute(
+                    self.service.playlistItems().list(
+                        part="contentDetails",
+                        playlistId=playlist_id,
+                        maxResults=50,
+                        pageToken=token,
+                    ),
+                    "playlistItems.list",
+                )
+                for item in response.get("items", []):
+                    video_id = item.get("contentDetails", {}).get("videoId")
+                    if isinstance(video_id, str):
+                        video_ids.add(video_id)
+                token = response.get("nextPageToken")
+                if not token:
+                    break
             else:
-                logger.warning(f"Failed to add video {video_id} to playlist: {e}")
-                return False
-        except Exception as e:
-            logger.warning(f"Unexpected error adding video {video_id} to playlist: {e}")
-            return False
+                raise ExistingPlaylistLookupError("Playlist pagination exceeded 5,000 items")
+        except (YouTubeClientError, YouTubeAuthenticationError) as exc:
+            raise ExistingPlaylistLookupError(
+                "Could not safely determine existing playlist items"
+            ) from exc
+        atomic_write_json(
+            cache_file,
+            {
+                "playlist_id": playlist_id,
+                "fetched_at": datetime.now(timezone.utc).isoformat(),
+                "video_ids": sorted(video_ids),
+            },
+            mode=0o600,
+        )
+        return video_ids
+
+    def get_or_create_playlist(
+        self, playlist_id: str | None, playlist_name: str, privacy_status: str = "unlisted"
+    ) -> str:
+        if playlist_id:
+            response = self._execute(
+                self.service.playlists().list(part="snippet", id=playlist_id), "playlists.list"
+            )
+            if not response.get("items"):
+                raise PlaylistOperationError(
+                    f"Playlist {playlist_id} was not found or is inaccessible"
+                )
+            return playlist_id
+        response = self._execute(
+            self.service.playlists().insert(
+                part="snippet,status",
+                body={
+                    "snippet": {
+                        "title": playlist_name,
+                        "description": "Automatically curated playlist created by YouTube Sleep Queue",
+                    },
+                    "status": {"privacyStatus": privacy_status},
+                },
+            ),
+            "playlists.insert",
+        )
+        new_id = response.get("id")
+        if not isinstance(new_id, str) or not new_id:
+            raise PlaylistOperationError("Playlist creation returned no ID")
+        return new_id
+
+    def add_video_to_playlist(self, playlist_id: str, video_id: str) -> PlaylistAddOutcome:
+        try:
+            self._execute(
+                self.service.playlistItems().insert(
+                    part="snippet",
+                    body={
+                        "snippet": {
+                            "playlistId": playlist_id,
+                            "resourceId": {"kind": "youtube#video", "videoId": video_id},
+                        }
+                    },
+                ),
+                "playlistItems.insert",
+            )
+            return PlaylistAddOutcome.ADDED
+        except YouTubeQuotaError:
+            raise
+        except YouTubeAuthenticationError:
+            raise
+        except YouTubeClientError:
+            return PlaylistAddOutcome.FAILED
 
     def add_videos_to_playlist(
-        self, playlist_id: str, video_ids: List[str]
-    ) -> Dict[str, bool]:
-        """
-        Add multiple videos to a playlist with duplicate detection and quota-aware early termination.
-
-        Args:
-            playlist_id: Target playlist ID
-            video_ids: List of YouTube video IDs to add
-
-        Returns:
-            Dict mapping video_id to success status (True/False)
-        """
+        self, playlist_id: str, video_ids: list[str]
+    ) -> dict[str, PlaylistAddOutcome]:
         if not video_ids:
             return {}
-            
-        # Fetch existing playlist items to avoid duplicates
-        existing_video_ids = self.fetch_existing_playlist_items(playlist_id)
-        
-        # Filter out duplicates before attempting insertion
-        new_video_ids = []
-        skipped_duplicates = []
-        
+        existing = self.fetch_existing_playlist_items(playlist_id)
+        outcomes: dict[str, PlaylistAddOutcome] = {
+            video_id: PlaylistAddOutcome.ALREADY_PRESENT
+            for video_id in video_ids
+            if video_id in existing
+        }
         for video_id in video_ids:
-            if video_id in existing_video_ids:
-                skipped_duplicates.append(video_id)
-                logger.info(f"Skipping duplicate video: {video_id}")
-            else:
-                new_video_ids.append(video_id)
-        
-        # Log duplicate detection results
-        if skipped_duplicates:
-            logger.info(f"Skipped {len(skipped_duplicates)} duplicate videos (quota saved: {len(skipped_duplicates) * 50} units)")
-        
-        if not new_video_ids:
-            logger.info("All videos already exist in playlist - no insertions needed")
-            # Return success for all videos since they're already in the playlist
-            return {video_id: True for video_id in video_ids}
-
-        # Process only new videos
-        results = {}
-        
-        # Mark all skipped duplicates as successful (they're already in the playlist)
-        for video_id in skipped_duplicates:
-            results[video_id] = True
-
-        # Add only the new videos
-        logger.info(f"Adding {len(new_video_ids)} new videos to playlist")
-        for video_id in new_video_ids:
-            # Stop processing if quota was exceeded
+            if video_id in outcomes:
+                continue
             if self.quota_exceeded:
-                logger.warning(f"Skipping remaining videos due to quota exceeded")
-                break
-                
-            success = self.add_video_to_playlist(playlist_id, video_id)
-            results[video_id] = success
-
-        successful = sum(results.values())
-        total_attempted = len([v for v in video_ids if v not in skipped_duplicates])
-        
-        if self.quota_exceeded and len(results) < len(video_ids):
-            processed = len(results) - len(skipped_duplicates)
-            logger.warning(
-                f"Quota exceeded: only processed {processed}/{total_attempted} new videos, "
-                f"{successful} total successful (including {len(skipped_duplicates)} pre-existing)"
-            )
-        else:
-            new_additions = successful - len(skipped_duplicates)
-            logger.info(
-                f"Successfully processed {len(video_ids)} videos: "
-                f"{new_additions} newly added, {len(skipped_duplicates)} already existed"
-            )
-
-        return results
+                outcomes[video_id] = PlaylistAddOutcome.FAILED
+                continue
+            outcomes[video_id] = self.add_video_to_playlist(playlist_id, video_id)
+        return outcomes

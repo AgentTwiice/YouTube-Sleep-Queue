@@ -14,7 +14,7 @@ PROJECT_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
 # Change to project directory
 cd "$PROJECT_DIR"
 
-echo "Running yt-sub-playlist in DRY RUN mode..."
+echo "Running YouTube Sleep Queue in DRY RUN mode..."
 echo "This will show what videos would be added without making changes."
 echo ""
 

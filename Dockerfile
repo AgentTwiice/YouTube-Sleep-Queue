@@ -3,9 +3,9 @@
 # --- builder ---------------------------------------------------------------
 # Resolves and installs the project into /app/.venv using `uv`. The final
 # stage copies the venv but not `uv` itself, keeping the runtime image lean.
-FROM python:3.11-slim AS builder
+FROM python:3.11-slim@sha256:90edbeb8e4efce8dfe102f24c5ea1c8a1d770ff3d99c9c565d89ec97145f0fea AS builder
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+COPY --from=ghcr.io/astral-sh/uv:0.8.22@sha256:9874eb7afe5ca16c363fe80b294fe700e460df29a55532bbfea234a0f12eddb1 /uv /uvx /usr/local/bin/
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -24,11 +24,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # them present at build time.
 COPY LICENSE README.md ./
 COPY yt_sub_playlist ./yt_sub_playlist
+COPY dashboard ./dashboard
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
 # --- runtime ---------------------------------------------------------------
-FROM python:3.11-slim
+FROM python:3.11-slim@sha256:90edbeb8e4efce8dfe102f24c5ea1c8a1d770ff3d99c9c565d89ec97145f0fea
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -57,4 +58,4 @@ USER app
 
 # ENTRYPOINT bakes in the CLI invocation so `docker run <image> --help` works.
 # Override --entrypoint to launch the dashboard or any other module.
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh", "yt-sub-playlist"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh", "youtube-sleep-queue"]

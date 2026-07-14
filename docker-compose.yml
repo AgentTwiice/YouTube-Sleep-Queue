@@ -1,9 +1,9 @@
-# docker-compose.yml — raw Docker / VPS deploy path for yt-sub-playlist.
+# docker-compose.yml — raw Docker / VPS deploy path for YouTube Sleep Queue.
 #
 # This file is intended to live in the user's deploy checkout (their own
 # fork, or a copy alongside ./data/). It builds the image locally by
 # default. Once the project publishes images to ghcr.io (#13), swap
-# `build: .` for `image: ghcr.io/keif/yt-sub-playlist:<version>` and
+# `build: .` for `image: ghcr.io/AgentTwiice/youtube-sleep-queue:<version>` and
 # `docker compose pull` instead of `docker compose build`.
 #
 # Secrets layout: place client_secrets.json and token.json directly under
@@ -13,14 +13,14 @@
 #
 # Scheduling: this service is intentionally one-shot — no `restart` policy.
 # Trigger it from host cron or a systemd timer:
-#   0 6 * * *   cd /srv/yt-sub-playlist && /usr/bin/docker compose run --rm sync >> /var/log/yt-sub-playlist.log 2>&1
+#   0 6 * * *   cd /srv/youtube-sleep-queue && /usr/bin/docker compose run --rm sync >> /var/log/youtube-sleep-queue.log 2>&1
 # See docs/deploy/docker.md (#16) for the full runbook.
 
 services:
   sync:
     build: .
-    image: yt-sub-playlist:local
-    container_name: yt-sub-playlist-sync
+    image: youtube-sleep-queue:local
+    container_name: youtube-sleep-queue-sync
     volumes:
       # ./data holds:
       #   - client_secrets.json + token.json (credentials)
@@ -37,12 +37,10 @@ services:
       - ./data:/data
 
   # ---------------------------------------------------------------------------
-  # The Flask dashboard is intentionally NOT shipped in the cron-job image.
-  # The dashboard backend uses cwd-relative imports (no __init__.py in
-  # dashboard/backend/) that make it awkward to launch from the package-only
-  # image this Dockerfile produces. Recommended v1 pattern: run the dashboard
-  # locally on your laptop with `uv run`, pointed at the same ./data directory
-  # (mount via sshfs/Tailscale if the data lives on a remote VPS).
+  # The Flask dashboard is intentionally NOT installed in the cron-job image:
+  # its dependencies are an optional extra and it has no user authentication.
+  # Run the packaged dashboard locally with `uv run python -m
+  # dashboard.backend.run`, pointed at the same data directory.
   #
   # A future spec will cover dashboard deploy with a proper auth layer. See
   # `docs/superpowers/specs/2026-06-28-deploy-your-own-design.md`

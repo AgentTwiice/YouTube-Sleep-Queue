@@ -30,7 +30,7 @@ jobs:
             -v ${{ github.workspace }}/data:/data \
             -e CLIENT_SECRETS_B64="${{ secrets.CLIENT_SECRETS_B64 }}" \
             -e TOKEN_B64="${{ secrets.TOKEN_B64 }}" \
-            ghcr.io/keif/yt-sub-playlist:<version>
+            ghcr.io/agenttwiice/youtube-sleep-queue:<version>
 
       - name: Reclaim ownership for runner
         # The container's UID 1000 wrote the refreshed token.json. The round-trip

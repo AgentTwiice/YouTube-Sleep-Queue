@@ -1,6 +1,22 @@
 // Configuration Page JavaScript
 
-const API_BASE = 'http://localhost:5001';
+const API_BASE = window.location.origin;
+let csrfToken = null;
+
+async function getCsrfToken() {
+    if (csrfToken) return csrfToken;
+    const response = await fetch(`${API_BASE}/api/csrf-token`);
+    if (!response.ok) throw new Error('Could not initialize request protection');
+    const data = await response.json();
+    csrfToken = data.csrf_token;
+    return csrfToken;
+}
+async function protectedHeaders() {
+    return {
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': await getCsrfToken()
+    };
+}
 
 // DOM Elements
 const elements = {
@@ -23,6 +39,11 @@ const elements = {
     maxVideos: document.getElementById('maxVideos'),
     maxVideosValue: document.getElementById('maxVideosValue'),
     skipLiveContent: document.getElementById('skipLiveContent'),
+    ollamaBaseUrl: document.getElementById('ollamaBaseUrl'),
+    ollamaModel: document.getElementById('ollamaModel'),
+    ollamaTimeout: document.getElementById('ollamaTimeout'),
+    sleepMinimumScore: document.getElementById('sleepMinimumScore'),
+    sleepQueueSize: document.getElementById('sleepQueueSize'),
     keywordFilterMode: document.getElementById('keywordFilterMode'),
     keywordIncludeGroup: document.getElementById('keywordIncludeGroup'),
     keywordExcludeGroup: document.getElementById('keywordExcludeGroup'),
@@ -35,6 +56,7 @@ const elements = {
     saveBtn: document.getElementById('saveBtn'),
     previewBtn: document.getElementById('previewBtn'),
     resetBtn: document.getElementById('resetBtn'),
+    manageChannelsBtn: document.getElementById('manageChannelsBtn'),
     message: document.getElementById('message'),
     quotaUsed: document.getElementById('quotaUsed'),
     quotaRemaining: document.getElementById('quotaRemaining'),
@@ -44,7 +66,8 @@ const elements = {
 };
 
 // Initialize
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
+    await getCsrfToken();
     loadConfiguration();
     loadStats();
     setupEventListeners();
@@ -81,6 +104,11 @@ async function loadConfiguration() {
 
             elements.maxVideos.value = config.max_videos || 50;
             elements.skipLiveContent.checked = config.skip_live_content !== false;
+            elements.ollamaBaseUrl.value = config.ollama_base_url || 'http://localhost:11434';
+            elements.ollamaModel.value = config.ollama_model || 'llama3.2:3b';
+            elements.ollamaTimeout.value = config.ollama_timeout_seconds || 30;
+            elements.sleepMinimumScore.value = config.sleep_minimum_score ?? 70;
+            elements.sleepQueueSize.value = config.sleep_queue_size || 10;
 
             // Keyword filter settings
             elements.keywordFilterMode.value = config.keyword_filter_mode || 'none';
@@ -167,6 +195,9 @@ function setupEventListeners() {
     elements.saveBtn.addEventListener('click', saveConfiguration);
     elements.previewBtn.addEventListener('click', previewChanges);
     elements.resetBtn.addEventListener('click', resetToDefaults);
+    elements.manageChannelsBtn.addEventListener('click', () => {
+        window.location.href = 'channels.html';
+    });
 }
 
 // Update keyword filter visibility based on selected mode
@@ -250,7 +281,12 @@ function getConfigFromForm() {
         min_duration_seconds: parseInt(elements.minDuration.value),
         lookback_hours: parseInt(elements.lookbackHours.value),
         max_videos: parseInt(elements.maxVideos.value),
-        skip_live_content: elements.skipLiveContent.checked
+        skip_live_content: elements.skipLiveContent.checked,
+        ollama_base_url: elements.ollamaBaseUrl.value.trim(),
+        ollama_model: elements.ollamaModel.value.trim(),
+        ollama_timeout_seconds: parseInt(elements.ollamaTimeout.value),
+        sleep_minimum_score: parseFloat(elements.sleepMinimumScore.value),
+        sleep_queue_size: parseInt(elements.sleepQueueSize.value)
     };
 
     // Only include max_duration_seconds if not unlimited
@@ -304,9 +340,7 @@ async function saveConfiguration() {
 
         const response = await fetch(`${API_BASE}/api/config`, {
             method: 'PUT',
-            headers: {
-                'Content-Type': 'application/json'
-            },
+            headers: await protectedHeaders(),
             body: JSON.stringify(config)
         });
 
@@ -338,9 +372,7 @@ async function previewChanges() {
         // First validate the config
         const validateResponse = await fetch(`${API_BASE}/api/config/validate`, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
+            headers: await protectedHeaders(),
             body: JSON.stringify(config)
         });
 
@@ -352,9 +384,16 @@ async function previewChanges() {
             return;
         }
 
-        // TODO: Implement preview refresh endpoint
-        // For now, just show a message
-        showMessage('Preview mode is coming soon! For now, save your changes and run a manual refresh.', 'success');
+        const response = await fetch(`${API_BASE}/api/refresh`, {
+            method: 'POST',
+            headers: await protectedHeaders(),
+            body: JSON.stringify({dry_run: true})
+        });
+        const result = await response.json();
+        if (response.status !== 202 || !result.success) {
+            throw new Error(result.error || 'Could not start preview');
+        }
+        showMessage(`Preview started. Job ID: ${result.job_id}`, 'success');
 
     } catch (error) {
         console.error('Error previewing:', error);
@@ -374,7 +413,9 @@ async function resetToDefaults() {
         setLoading(true);
 
         const response = await fetch(`${API_BASE}/api/config/reset`, {
-            method: 'POST'
+            method: 'POST',
+            headers: await protectedHeaders(),
+            body: JSON.stringify({})
         });
 
         const data = await response.json();
@@ -413,16 +454,5 @@ function setLoading(isLoading) {
         container.classList.add('loading');
     } else {
         container.classList.remove('loading');
-    }
-}
-
-// Format duration for display
-function formatDuration(seconds) {
-    if (seconds >= 3600) {
-        return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
-    } else if (seconds >= 60) {
-        return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-    } else {
-        return `${seconds}s`;
     }
 }

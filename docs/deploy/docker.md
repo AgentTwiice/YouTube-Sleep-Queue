@@ -1,6 +1,6 @@
 # Raw Docker / VPS Runbook
 
-Self-host `yt-sub-playlist` on any Linux VPS (or local machine) with Docker installed. The sync job runs as a one-shot container triggered by host cron or a systemd timer. No daemon, no restart policy.
+Self-host YouTube Sleep Queue on any Linux VPS (or local machine) with Docker installed. The sync job runs as a one-shot container triggered by host cron or a systemd timer. No daemon, no restart policy.
 
 ---
 
@@ -8,10 +8,10 @@ Self-host `yt-sub-playlist` on any Linux VPS (or local machine) with Docker inst
 
 - **Docker 24+** (ships Compose v2 as `docker compose`). Check: `docker compose version`.
 - `make` — optional shortcut layer; not required.
-- A **full checkout** of this repo on the server. The Dockerfile builds from the whole tree (`pyproject.toml`, `uv.lock`, `LICENSE`, `README.md`, `yt_sub_playlist/`), so grabbing just `docker-compose.yml` and `Dockerfile` will fail at build time. Once the published image ships (issue #13), you can skip this and pull instead — see [Build vs. pull](#build-vs-pull) below.
+- A **full checkout** of this repo on the server when building locally. The Dockerfile builds from the whole tree (`pyproject.toml`, `uv.lock`, `LICENSE`, `README.md`, `yt_sub_playlist/`), so grabbing just `docker-compose.yml` and `Dockerfile` will fail at build time. If a release image is available, you can skip this and pull instead — see [Build vs. pull](#build-vs-pull) below.
   ```bash
-  git clone https://github.com/keif/playlist-from-subs.git /srv/yt-sub-playlist
-  cd /srv/yt-sub-playlist
+  git clone https://github.com/AgentTwiice/YouTube-Sleep-Queue.git /srv/youtube-sleep-queue
+  cd /srv/youtube-sleep-queue
   ```
 
 **OAuth credentials** — complete the one-time bootstrap on your laptop first:  
@@ -28,7 +28,7 @@ That process produces `client_secrets.json` and `token.json`. You will copy both
 All credentials and runtime state live in `./data/`. The compose file mounts it as `./data:/data`. The container writes state files (playlist cache, API log) here on every run, and rewrites `token.json` whenever the OAuth library refreshes it, so this directory must be writable by the container's UID.
 
 ```
-/srv/yt-sub-playlist/
+/srv/youtube-sleep-queue/
 ├── docker-compose.yml
 ├── Dockerfile
 └── data/                             ← bind-mounted at /data inside the container
@@ -56,8 +56,8 @@ below lock the current user out of writing into `./data/`.
 mkdir -p ./data
 
 # From your laptop:
-scp /path/to/client_secrets.json user@your-server:/srv/yt-sub-playlist/data/
-scp /path/to/token.json          user@your-server:/srv/yt-sub-playlist/data/
+scp /path/to/client_secrets.json user@your-server:/srv/youtube-sleep-queue/data/
+scp /path/to/token.json          user@your-server:/srv/youtube-sleep-queue/data/
 ```
 
 ### Lock down the data directory
@@ -84,8 +84,8 @@ the host user out of writing into `./data/`. If you missed it, either
 them in, then re-run the lockdown.
 
 ```bash
-scp /path/to/config.json user@your-server:/srv/yt-sub-playlist/data/   # optional
-scp /path/to/.env        user@your-server:/srv/yt-sub-playlist/data/   # optional
+scp /path/to/config.json user@your-server:/srv/youtube-sleep-queue/data/   # optional
+scp /path/to/.env        user@your-server:/srv/youtube-sleep-queue/data/   # optional
 ```
 
 See the [README](../../README.md) for the full list of supported env vars and config keys.
@@ -94,30 +94,30 @@ See the [README](../../README.md) for the full list of supported env vars and co
 
 ## Build vs. pull
 
-### Now: build locally
+### Build locally
 
-Image publishing to `ghcr.io` is in-flight (#13). Until it lands, build the image from source:
+Build the image from source when no release image has been published yet:
 
 ```bash
 docker compose build
 ```
 
-### Later: pull from ghcr.io
+### Pull a published release from ghcr.io
 
-Once #13 ships, swap the compose file's `build: .` for an image pin and pull instead of building:
+Once the repository's container workflow has published a release tag, swap the compose file's `build: .` for an image pin and pull instead of building:
 
 1. In `docker-compose.yml`, replace:
    ```yaml
    services:
      sync:
        build: .
-       image: yt-sub-playlist:local
+       image: youtube-sleep-queue:local
    ```
    with:
    ```yaml
    services:
      sync:
-       image: ghcr.io/keif/yt-sub-playlist:<version>
+       image: ghcr.io/agenttwiice/youtube-sleep-queue:<version>
    ```
 2. Pull the published image:
    ```bash
@@ -159,40 +159,40 @@ crontab -e
 Add a line (runs daily at 06:00):
 
 ```cron
-0 6 * * *  cd /srv/yt-sub-playlist && /usr/bin/docker compose run --rm sync >> ${HOME}/yt-sub-playlist.log 2>&1
+0 6 * * *  cd /srv/youtube-sleep-queue && /usr/bin/docker compose run --rm sync >> ${HOME}/youtube-sleep-queue.log 2>&1
 ```
 
-Log to a user-writable path (`${HOME}/yt-sub-playlist.log`) rather than
+Log to a user-writable path (`${HOME}/youtube-sleep-queue.log`) rather than
 `/var/log/`, which requires root. If you install the cron entry as root
-(via `sudo crontab -e`) then `/var/log/yt-sub-playlist.log` is fine.
+(via `sudo crontab -e`) then `/var/log/youtube-sleep-queue.log` is fine.
 
 Use the full path to `docker` (`which docker`) if your cron environment doesn't include it.
 
 ### Option B: systemd timer
 
-Create two unit files. Replace `/srv/yt-sub-playlist` with your actual checkout path.
+Create two unit files. Replace `/srv/youtube-sleep-queue` with your actual checkout path.
 
-**/etc/systemd/system/yt-sub-playlist-sync.service**
+**/etc/systemd/system/youtube-sleep-queue-sync.service**
 
 ```ini
 [Unit]
-Description=yt-sub-playlist sync
+Description=YouTube Sleep Queue sync
 After=docker.service
 Requires=docker.service
 
 [Service]
 Type=oneshot
-WorkingDirectory=/srv/yt-sub-playlist
+WorkingDirectory=/srv/youtube-sleep-queue
 ExecStart=/usr/bin/docker compose run --rm sync
 StandardOutput=journal
 StandardError=journal
 ```
 
-**/etc/systemd/system/yt-sub-playlist-sync.timer**
+**/etc/systemd/system/youtube-sleep-queue-sync.timer**
 
 ```ini
 [Unit]
-Description=Run yt-sub-playlist sync daily at 06:00
+Description=Run YouTube Sleep Queue sync daily at 06:00
 
 [Timer]
 OnCalendar=*-*-* 06:00:00
@@ -206,13 +206,13 @@ Enable and start:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now yt-sub-playlist-sync.timer
+sudo systemctl enable --now youtube-sleep-queue-sync.timer
 
 # Verify the timer is active:
-systemctl list-timers yt-sub-playlist-sync.timer
+systemctl list-timers youtube-sleep-queue-sync.timer
 
 # Trigger a manual run immediately (bypasses the timer schedule):
-sudo systemctl start yt-sub-playlist-sync.service
+sudo systemctl start youtube-sleep-queue-sync.service
 ```
 
 **Note:** cron *inside* the container is out of scope. The container exits after each sync; scheduling is the host's job.
@@ -221,11 +221,11 @@ sudo systemctl start yt-sub-playlist-sync.service
 
 ## Logs
 
-- **Host cron path:** logs land in whatever file you redirect to (the example above uses `${HOME}/yt-sub-playlist.log`, or `/var/log/yt-sub-playlist.log` for the root-cron variant). Rotate with `logrotate` if needed.
+- **Host cron path:** logs land in whatever file you redirect to (the example above uses `${HOME}/youtube-sleep-queue.log`, or `/var/log/youtube-sleep-queue.log` for the root-cron variant). Rotate with `logrotate` if needed.
 - **systemd timer path:** logs go to the journal. Read them with:
   ```bash
-  journalctl -u yt-sub-playlist-sync.service
-  journalctl -u yt-sub-playlist-sync.service --since "1 hour ago"
+  journalctl -u youtube-sleep-queue-sync.service
+  journalctl -u youtube-sleep-queue-sync.service --since "1 hour ago"
   ```
 
 After a real run (not `--dry-run`), the primary verification is the log
@@ -255,7 +255,7 @@ path is currently hard-coded, so it does not yet honour the same
 issue #26; extending it to the dashboard is a future change).
 
 For now, treat "look at the server's state" as an admin-shell task:
-`ssh user@your-server 'ls -la /srv/yt-sub-playlist/data/'`.
+`ssh user@your-server 'ls -la /srv/youtube-sleep-queue/data/'`.
 
 A future spec will cover dashboard deploy with a proper auth layer and
 teach the dashboard to point at a mounted or remote directory.
@@ -280,18 +280,18 @@ Google refresh tokens can expire after roughly **6 months of disuse** or if the 
    ```bash
    # Option A: scp to a staging path, then move as root
    scp /path/to/token.json user@your-server:/tmp/token.json
-   ssh user@your-server 'sudo install -m 600 -o 1000 -g 1000 /tmp/token.json /srv/yt-sub-playlist/data/token.json && rm /tmp/token.json'
+   ssh user@your-server 'sudo install -m 600 -o 1000 -g 1000 /tmp/token.json /srv/youtube-sleep-queue/data/token.json && rm /tmp/token.json'
 
    # Option B: rsync with --rsync-path=sudo (requires passwordless sudo)
-   rsync -av --rsync-path='sudo rsync' --chown=1000:1000 /path/to/token.json user@your-server:/srv/yt-sub-playlist/data/
+   rsync -av --rsync-path='sudo rsync' --chown=1000:1000 /path/to/token.json user@your-server:/srv/youtube-sleep-queue/data/
 
    # macOS Docker Desktop / OrbStack hosts (no UID lockdown): plain scp works.
-   scp /path/to/token.json user@your-server:/srv/yt-sub-playlist/data/
+   scp /path/to/token.json user@your-server:/srv/youtube-sleep-queue/data/
    ```
 
 3. If a sync container is currently running, stop it:
    ```bash
-   docker stop yt-sub-playlist-sync
+   docker stop youtube-sleep-queue-sync
    ```
    The next scheduled run will pick up the new token automatically.
 

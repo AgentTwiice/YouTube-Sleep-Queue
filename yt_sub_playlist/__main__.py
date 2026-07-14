@@ -3,7 +3,7 @@ Main entry point for YouTube Subscription Playlist Manager.
 
 This module provides the command-line interface and orchestrates the complete workflow:
 - Configuration loading and validation
-- Video fetching from subscriptions  
+- Video fetching from subscriptions
 - Intelligent filtering and deduplication
 - Playlist synchronization
 - Report generation
@@ -15,17 +15,27 @@ import sys
 from pathlib import Path
 
 from .config.env_loader import load_config, setup_logging
+from .config.schema import ConfigSchema
 from .core.playlist_manager import PlaylistManager, resolve_data_dir
-from .core.video_filtering import get_published_after_timestamp, parse_channel_whitelist
 from .core.youtube_client import dump_api_call_log
 
 logger = logging.getLogger(__name__)
 
 
+def _video_limit(value: str) -> int:
+    try:
+        limit = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("limit must be an integer") from exc
+    if not 1 <= limit <= 200:
+        raise argparse.ArgumentTypeError("limit must be between 1 and 200")
+    return limit
+
+
 def create_argument_parser() -> argparse.ArgumentParser:
     """Create and configure the command-line argument parser."""
     parser = argparse.ArgumentParser(
-        description="Add new subscription videos to a YouTube playlist",
+        description="Discover and rank subscription videos for a YouTube sleep queue",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -43,13 +53,11 @@ Examples:
         help="Show what would be added without making changes",
     )
 
-    parser.add_argument(
-        "--verbose", action="store_true", help="Enable verbose debug logging"
-    )
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose debug logging")
 
     parser.add_argument(
         "--limit",
-        type=int,
+        type=_video_limit,
         help="Maximum number of recent videos to fetch (overrides MAX_VIDEOS_TO_FETCH)",
     )
 
@@ -82,12 +90,10 @@ def main():
     try:
         # Load configuration
         config = load_config()
-        if args.limit:
+        if args.limit is not None:
             config["max_videos"] = args.limit
 
-        logger.info(
-            f"Starting yt-sub-playlist ({'DRY RUN' if args.dry_run else 'LIVE RUN'})"
-        )
+        logger.info(f"Starting YouTube Sleep Queue ({'DRY RUN' if args.dry_run else 'LIVE RUN'})")
         logger.info(
             f"Config: {config['lookback_hours']}h lookback, {config['min_duration_seconds']}s min duration"
         )
@@ -106,21 +112,19 @@ def main():
         # set, this skips the API insert entirely — see PlaylistManager for
         # sentinel handling. Closes the "--dry-run still creates a playlist"
         # side effect (issue #25).
-        playlist_id = manager.get_or_create_playlist(
-            playlist_id=config["playlist_id"],
-            playlist_name=config["playlist_name"],
-            privacy_status=config["playlist_visibility"],
-            dry_run=args.dry_run,
-        )
+        playlist_id = config["playlist_id"]
 
-        # Fetch recent subscription videos and sync to playlist
-        published_after = get_published_after_timestamp(config["lookback_hours"])
-        
+        # Use the selected date mode for the upstream discovery boundary.
+        # Generated playlists are not created until ranked candidates exist.
+        published_after = ConfigSchema.discovery_start(config)
+
         video_results = manager.sync_subscription_videos_to_playlist(
             playlist_id=playlist_id,
             published_after=published_after,
-            channel_whitelist=config["channel_whitelist"],
-            dry_run=args.dry_run
+            channel_whitelist=None,
+            dry_run=args.dry_run,
+            playlist_name=config["playlist_name"],
+            privacy_status=config["playlist_visibility"],
         )
 
         # Generate report if requested
@@ -128,21 +132,23 @@ def main():
             manager.write_report(video_results, args.report)
 
         # Summary
-        successful = sum(1 for v in video_results if v.get('added', False))
+        successful = sum(1 for v in video_results if v.get("playlist_status") == "added")
+        existing = sum(1 for v in video_results if v.get("playlist_status") == "already_present")
         total = len(video_results)
 
         if args.dry_run:
             logger.info(f"DRY RUN complete: {total} videos would be added")
         else:
             logger.info(
-                f"Processing complete: {successful}/{total} videos added successfully"
+                f"Processing complete: {successful} added, {existing} already present, {total} selected"
             )
 
-            if successful < total:
-                logger.warning(f"{total - successful} videos failed to add")
+            failed = total - successful - existing
+            if failed:
+                logger.warning(f"{failed} videos failed to add")
                 _dump_api_call_log()
                 sys.exit(1)
-        
+
         # Dump API call log for quota analysis
         _dump_api_call_log()
 
@@ -152,7 +158,7 @@ def main():
         sys.exit(130)
 
     except SystemExit:
-        # Re-raise SystemExit (from authentication failures, etc.)
+        # Preserve argparse and deliberate process exit codes.
         _dump_api_call_log()
         raise
 
