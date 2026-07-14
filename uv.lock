@@ -630,7 +630,7 @@ wheels = [
 ]
 
 [[package]]
-name = "yt-sub-playlist"
+name = "youtube-sleep-queue"
 version = "4.1.0"
 source = { editable = "." }
 dependencies = [

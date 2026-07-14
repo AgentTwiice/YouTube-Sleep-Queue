@@ -280,7 +280,8 @@ class YouTubeClient:
                         "channel_title": activity["snippet"]["channelTitle"],
                         "published_at": activity["snippet"]["publishedAt"],
                         "duration_seconds": parse_duration_to_seconds(details["duration"]),
-                        "live_broadcast": details["liveBroadcastContent"]
+                        "live_broadcast": details["liveBroadcastContent"],
+                        "description": details.get("description", ""),
                     }
                     videos.append(video_data)
 
@@ -477,7 +478,8 @@ class YouTubeClient:
                     "channel_title": channel_title,
                     "published_at": snippet["publishedAt"],
                     "duration_seconds": parse_duration_to_seconds(details["duration"]),
-                    "live_broadcast": details["liveBroadcastContent"]
+                    "live_broadcast": details["liveBroadcastContent"],
+                    "description": details.get("description", ""),
                 }
                 videos.append(video_data)
 
@@ -545,7 +547,8 @@ class YouTubeClient:
                     live_broadcast_content = item["snippet"].get("liveBroadcastContent", "none")
                     batch_details[video_id] = {
                         "duration": duration,
-                        "liveBroadcastContent": live_broadcast_content
+                        "liveBroadcastContent": live_broadcast_content,
+                        "description": item["snippet"].get("description", ""),
                     }
                 
                 # Log any missing videos from the batch

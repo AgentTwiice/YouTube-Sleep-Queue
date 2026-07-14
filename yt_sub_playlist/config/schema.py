@@ -7,6 +7,7 @@ including default values, validation rules, and type definitions.
 
 from datetime import datetime
 from typing import Any, Dict, Optional, Set
+from urllib.parse import urlparse
 
 
 class ConfigSchema:
@@ -19,7 +20,7 @@ class ConfigSchema:
     
     # Default configuration values
     DEFAULTS = {
-        "playlist_name": "Auto Playlist from Subscriptions",
+        "playlist_name": "YouTube Sleep Queue",
         "playlist_visibility": "unlisted",
         "min_duration_seconds": 60,
         "max_duration_seconds": None,  # None = unlimited
@@ -39,6 +40,11 @@ class ConfigSchema:
         "keyword_match_type": "any",     # "any" or "all"
         "keyword_case_sensitive": False,
         "keyword_search_description": False,  # Search in description too
+        "ollama_base_url": "http://localhost:11434",
+        "ollama_model": "llama3.2:3b",
+        "ollama_timeout_seconds": 30,
+        "sleep_minimum_score": 70.0,
+        "sleep_queue_size": 10,
     }
     
     # Required configuration keys
@@ -65,6 +71,11 @@ class ConfigSchema:
         "keyword_search_description",
         "max_videos",
         "skip_live_content",
+        "ollama_base_url",
+        "ollama_model",
+        "ollama_timeout_seconds",
+        "sleep_minimum_score",
+        "sleep_queue_size",
     }
     
     # Valid values for specific configuration keys
@@ -107,6 +118,7 @@ class ConfigSchema:
         cls._validate_keyword_filter_mode(validated_config.get("keyword_filter_mode"))
         cls._validate_keyword_match_type(validated_config.get("keyword_match_type"))
         cls._validate_keyword_filters(validated_config)
+        cls._validate_ollama_config(validated_config)
 
         return validated_config
     
@@ -192,12 +204,19 @@ class ConfigSchema:
             "max_duration_seconds": (1, 86400),  # 1 second to 24 hours (None allowed)
             "lookback_hours": (1, 168),          # 1 hour to 7 days
             "max_videos": (1, 200),              # 1 to 200 videos
+            "ollama_timeout_seconds": (1, 300),  # 1 second to 5 minutes
+            "sleep_queue_size": (1, 200),        # 1 to 200 videos
         }
 
         for field, (min_val, max_val) in numeric_fields.items():
             value = config.get(field)
             if value is not None:
-                if not isinstance(value, int) or value < min_val or value > max_val:
+                if (
+                    not isinstance(value, int)
+                    or isinstance(value, bool)
+                    or value < min_val
+                    or value > max_val
+                ):
                     raise ValueError(
                         f"Invalid {field}: {value}. "
                         f"Must be an integer between {min_val} and {max_val}"
@@ -212,6 +231,42 @@ class ConfigSchema:
                     f"max_duration_seconds ({max_duration}) cannot be less than "
                     f"min_duration_seconds ({min_duration})"
                 )
+
+        sleep_score = config.get("sleep_minimum_score")
+        if (
+            not isinstance(sleep_score, (int, float))
+            or isinstance(sleep_score, bool)
+            or not 0 <= sleep_score <= 100
+        ):
+            raise ValueError(
+                f"Invalid sleep_minimum_score: {sleep_score}. "
+                "Must be a number between 0 and 100"
+            )
+
+    @classmethod
+    def _validate_ollama_config(cls, config: Dict[str, Any]) -> None:
+        """Validate the configured Ollama endpoint and model name."""
+        base_url = config.get("ollama_base_url")
+        if not isinstance(base_url, str) or not base_url.strip():
+            raise ValueError("ollama_base_url must be a non-empty HTTP(S) URL")
+
+        parsed = urlparse(base_url)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "ollama_base_url must be an HTTP(S) URL without credentials, "
+                "a query string, or a fragment"
+            )
+
+        model = config.get("ollama_model")
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError("ollama_model must be a non-empty string")
 
     @classmethod
     def _validate_date_filter_mode(cls, mode: str) -> None:

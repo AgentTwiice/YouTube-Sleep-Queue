@@ -1,10 +1,19 @@
 [project]
-name = "yt-sub-playlist"
+name = "youtube-sleep-queue"
 version = "4.1.0"
-description = "Automatically sync YouTube subscription uploads into a custom playlist"
+description = "Automatically discovers, ranks and adds personalised sleep-suitable videos from your YouTube subscriptions."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"
+keywords = [
+  "youtube",
+  "playlist",
+  "automation",
+  "ollama",
+  "python",
+  "recommendation-system",
+  "youtube-api",
+]
 dependencies = [
   "google-api-python-client==2.198.0",
   "google-auth==2.55.1",
@@ -21,7 +30,13 @@ dashboard = [
 ]
 
 [project.scripts]
+youtube-sleep-queue = "yt_sub_playlist.__main__:main"
 yt-sub-playlist = "yt_sub_playlist.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/AgentTwiice/YouTube-Sleep-Queue"
+Repository = "https://github.com/AgentTwiice/YouTube-Sleep-Queue.git"
+Upstream = "https://github.com/keif/playlist-from-subs"
 
 [build-system]
 requires = ["hatchling"]

@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 def create_argument_parser() -> argparse.ArgumentParser:
     """Create and configure the command-line argument parser."""
     parser = argparse.ArgumentParser(
-        description="Add new subscription videos to a YouTube playlist",
+        description="Discover and rank subscription videos for a YouTube sleep queue",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -86,7 +86,7 @@ def main():
             config["max_videos"] = args.limit
 
         logger.info(
-            f"Starting yt-sub-playlist ({'DRY RUN' if args.dry_run else 'LIVE RUN'})"
+            f"Starting YouTube Sleep Queue ({'DRY RUN' if args.dry_run else 'LIVE RUN'})"
         )
         logger.info(
             f"Config: {config['lookback_hours']}h lookback, {config['min_duration_seconds']}s min duration"

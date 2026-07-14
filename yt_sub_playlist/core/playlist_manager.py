@@ -16,6 +16,8 @@ from typing import Any, Dict, List
 
 from .youtube_client import YouTubeClient
 from .video_filtering import VideoFilter
+from .sleep_ranker import OllamaClient, SleepRanker
+from .sleep_store import SleepQueueStore
 from ..config.env_loader import VideoCache
 
 logger = logging.getLogger(__name__)
@@ -71,6 +73,18 @@ class PlaylistManager:
         self.client = YouTubeClient(resolved_data_dir)
         self.cache = VideoCache(data_dir=resolved_data_dir)
         self.filter = VideoFilter(config, self.cache)
+        self.store = SleepQueueStore(
+            os.path.join(resolved_data_dir, "sleep_queue.sqlite3")
+        )
+        self.ranker = SleepRanker(
+            OllamaClient(
+                config["ollama_base_url"],
+                config["ollama_model"],
+                config["ollama_timeout_seconds"],
+            ),
+            config["sleep_minimum_score"],
+            config["sleep_queue_size"],
+        )
 
     def sync_subscription_videos_to_playlist(
         self,
@@ -91,6 +105,8 @@ class PlaylistManager:
         Returns:
             List of video metadata dicts with 'added' field indicating success
         """
+        run_id = self.store.start_run(dry_run)
+
         # Step 1: Fetch recent subscription videos
         logger.info(f"Fetching videos published after {published_after}")
         videos = self.client.get_recent_uploads_from_subscriptions(
@@ -100,6 +116,7 @@ class PlaylistManager:
 
         if not videos:
             logger.info("No recent subscription videos found")
+            self.store.complete_run(run_id, 0, 0)
             return []
 
         # Step 2: Filter videos based on criteria
@@ -107,14 +124,51 @@ class PlaylistManager:
 
         if not filtered_videos:
             logger.info("No videos passed filters")
+            self.store.complete_run(run_id, 0, 0)
             return []
 
-        # Step 3: Add videos to playlist
-        return self.add_videos_to_playlist(
+        # Bound local model calls using the existing max-videos setting while
+        # preferring the most recently published candidates.
+        filtered_videos = sorted(
+            filtered_videos,
+            key=lambda video: video.get("published_at", ""),
+            reverse=True,
+        )[: self.config["max_videos"]]
+
+        # Step 3: Persist and rank candidates using local Ollama.
+        self.store.save_candidates(run_id, filtered_videos)
+        all_ranked_videos = self.ranker.rank_all(filtered_videos)
+        ranked_videos = [
+            video for video in all_ranked_videos
+            if video["sleep_score"] >= self.config["sleep_minimum_score"]
+        ][: self.config["sleep_queue_size"]]
+        selected_ids = {video["video_id"] for video in ranked_videos}
+        for ranked in all_ranked_videos:
+            self.store.save_score(
+                ranked["video_id"],
+                ranked["sleep_score"],
+                ranked["sleep_rationale"],
+                ranked["sleep_signals"],
+                ranked["video_id"] in selected_ids,
+            )
+
+        self.store.complete_run(run_id, len(filtered_videos), len(ranked_videos))
+
+        if not ranked_videos:
+            logger.info("No videos met the minimum sleep suitability score")
+            return []
+
+        # Step 4: Add the highest-ranked videos to the playlist
+        results = self.add_videos_to_playlist(
             playlist_id=playlist_id,
-            videos=filtered_videos,
+            videos=ranked_videos,
             dry_run=dry_run
         )
+        if not dry_run:
+            self.store.mark_added(
+                video["video_id"] for video in results if video.get("added")
+            )
+        return results
 
     def add_videos_to_playlist(
         self,
@@ -199,7 +253,7 @@ class PlaylistManager:
         Raises:
             SystemExit: If playlist operations fail
         """
-        resolved_name = playlist_name or "Auto Playlist from Subscriptions"
+        resolved_name = playlist_name or "YouTube Sleep Queue"
 
         if dry_run and not playlist_id:
             logger.info(
@@ -238,7 +292,8 @@ class PlaylistManager:
             with open(report_path, 'w', newline='', encoding='utf-8') as csvfile:
                 fieldnames = [
                     'title', 'video_id', 'channel_title', 'channel_id',
-                    'published_at', 'duration_seconds', 'live_broadcast', 'added'
+                    'published_at', 'duration_seconds', 'live_broadcast',
+                    'sleep_score', 'sleep_rationale', 'added'
                 ]
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
 

@@ -17,6 +17,8 @@ from typing import Any, Dict, Optional, Set
 
 from dotenv import load_dotenv
 
+from .schema import ConfigSchema
+
 logger = logging.getLogger(__name__)
 
 # Cache configuration
@@ -64,7 +66,7 @@ def load_config() -> Dict[str, Any]:
 
     # Define defaults
     defaults = {
-        "playlist_name": "Auto Playlist from Subscriptions",
+        "playlist_name": "YouTube Sleep Queue",
         "playlist_visibility": "unlisted",
         "min_duration_seconds": 60,
         "lookback_hours": 24,
@@ -74,6 +76,11 @@ def load_config() -> Dict[str, Any]:
         "channel_filter_mode": "none",
         "channel_allowlist": None,
         "channel_blocklist": None,
+        "ollama_base_url": "http://localhost:11434",
+        "ollama_model": "llama3.2:3b",
+        "ollama_timeout_seconds": 30,
+        "sleep_minimum_score": 70,
+        "sleep_queue_size": 10,
     }
 
     # Build config with precedence: .env > config.json > defaults
@@ -99,12 +106,32 @@ def load_config() -> Dict[str, Any]:
             os.getenv("CHANNEL_BLOCKLIST"),
             json_config.get("channel_blocklist")
         ),
+        "ollama_base_url": os.getenv("OLLAMA_BASE_URL")
+        or json_config.get("ollama_base_url", defaults["ollama_base_url"]),
+        "ollama_model": os.getenv("OLLAMA_MODEL")
+        or json_config.get("ollama_model", defaults["ollama_model"]),
+        "ollama_timeout_seconds": int(
+            os.getenv("OLLAMA_TIMEOUT_SECONDS")
+            or json_config.get(
+                "ollama_timeout_seconds", defaults["ollama_timeout_seconds"]
+            )
+        ),
+        "sleep_minimum_score": float(
+            os.getenv("SLEEP_MINIMUM_SCORE")
+            or json_config.get(
+                "sleep_minimum_score", defaults["sleep_minimum_score"]
+            )
+        ),
+        "sleep_queue_size": int(
+            os.getenv("SLEEP_QUEUE_SIZE")
+            or json_config.get("sleep_queue_size", defaults["sleep_queue_size"])
+        ),
     }
 
     # Migrate legacy whitelist to new system if needed
     config = _migrate_legacy_channel_filter(config)
 
-    return config
+    return ConfigSchema.validate_config(config)
 
 
 def _parse_bool(env_value: Optional[str], json_value: Any) -> bool:
