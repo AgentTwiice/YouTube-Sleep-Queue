@@ -74,7 +74,7 @@ class DryRunPlaylistTests(unittest.TestCase):
         manager.client.get_or_create_playlist.assert_called_once()
         _, kwargs = manager.client.get_or_create_playlist.call_args
         self.assertIsNone(kwargs["playlist_id"])
-        self.assertEqual(kwargs["playlist_name"], "Auto Playlist from Subscriptions")
+        self.assertEqual(kwargs["playlist_name"], "YouTube Sleep Queue")
         self.assertEqual(result, "PLnew")
 
     def test_dry_run_sentinel_is_reserved(self):
