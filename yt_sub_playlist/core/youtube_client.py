@@ -692,7 +692,7 @@ class YouTubeClient:
             playlist_body = {
                 "snippet": {
                     "title": playlist_name,
-                    "description": f"Automatically curated playlist created by yt-sub-playlist",
+                    "description": "Automatically curated playlist created by YouTube Sleep Queue",
                 },
                 "status": {"privacyStatus": privacy_status},
             }

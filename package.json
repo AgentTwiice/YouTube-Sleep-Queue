@@ -10,7 +10,8 @@
     "release:minor": "standard-version --release-as minor",
     "release:major": "standard-version --release-as major",
     "release:patch": "standard-version --release-as patch",
-    "release:dry-run": "standard-version --dry-run"
+    "release:dry-run": "standard-version --dry-run",
+    "test": "node scripts/bump-pyproject.test.js && node scripts/bump-uv-lock.test.js"
   },
   "repository": {
     "type": "git",

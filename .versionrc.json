@@ -42,9 +42,9 @@
       "hidden": true
     }
   ],
-  "commitUrlFormat": "https://github.com/yourusername/yt-sub-playlist/commit/{{hash}}",
-  "compareUrlFormat": "https://github.com/yourusername/yt-sub-playlist/compare/{{previousTag}}...{{currentTag}}",
-  "issueUrlFormat": "https://github.com/yourusername/yt-sub-playlist/issues/{{id}}",
+  "commitUrlFormat": "https://github.com/AgentTwiice/YouTube-Sleep-Queue/commit/{{hash}}",
+  "compareUrlFormat": "https://github.com/AgentTwiice/YouTube-Sleep-Queue/compare/{{previousTag}}...{{currentTag}}",
+  "issueUrlFormat": "https://github.com/AgentTwiice/YouTube-Sleep-Queue/issues/{{id}}",
   "userUrlFormat": "https://github.com/{{user}}",
   "releaseCommitMessageFormat": "chore(release): {{currentTag}}",
   "issuePrefixes": ["#"]

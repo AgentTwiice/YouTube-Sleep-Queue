@@ -5,7 +5,7 @@
 # stage copies the venv but not `uv` itself, keeping the runtime image lean.
 FROM python:3.11-slim AS builder
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+COPY --from=ghcr.io/astral-sh/uv:0.8.22 /uv /uvx /usr/local/bin/
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

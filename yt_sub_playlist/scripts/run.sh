@@ -19,7 +19,7 @@ LOG_DIR="yt_sub_playlist/data/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/run.log"
 
-echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting yt-sub-playlist sync" >> "$LOG_FILE"
+echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting YouTube Sleep Queue sync" >> "$LOG_FILE"
 
 # Run the main application
 if uv run python -m yt_sub_playlist "$@" >> "$LOG_FILE" 2>&1; then
