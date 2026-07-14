@@ -153,6 +153,8 @@ class PlaylistAPI:
     def _load_sample_data(self) -> List[Dict[str, Any]]:
         """Load sample data as fallback."""
         sample_file = DASHBOARD_DIR / "playlist.json"
+        if not sample_file.exists():
+            sample_file = DASHBOARD_DIR / "playlist.example.json"
         try:
             with open(sample_file, 'r') as f:
                 return json.load(f)

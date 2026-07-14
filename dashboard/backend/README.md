@@ -100,7 +100,7 @@ The backend loads playlist data in this order:
 2. **JSON Cache** (`yt_sub_playlist/data/processed_videos.json`)
    - Cached data from CLI tool
 
-3. **Sample Data** (`dashboard/playlist.json`)
+3. **Sample Data** (`dashboard/playlist.example.json`)
    - Fallback for testing/demo
 
 ## CLI Integration

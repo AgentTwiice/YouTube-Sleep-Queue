@@ -218,7 +218,10 @@ class PlaylistDashboard {
 
     async loadSampleData() {
         try {
-            const response = await fetch('./playlist.json');
+            let response = await fetch('./playlist.json');
+            if (!response.ok) {
+                response = await fetch('./playlist.example.json');
+            }
             if (!response.ok) {
                 throw new Error(`HTTP error! status: ${response.status}`);
             }
@@ -226,7 +229,9 @@ class PlaylistDashboard {
             this.displayPlaylist(data);
         } catch (error) {
             console.error('Error loading sample data:', error);
-            this.showError('Could not load sample data. Make sure playlist.json exists in the same directory.');
+            this.showError(
+                'Could not load playlist data. Add playlist.json or keep playlist.example.json in this directory.'
+            );
         }
     }
 

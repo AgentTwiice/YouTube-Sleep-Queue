@@ -140,6 +140,8 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
+!.env.example
 .envrc
 .venv
 env/
@@ -211,8 +213,26 @@ marimo/_lsp/
 __marimo__/
 
 # secrets
-client_secrets.json
+client_secret*.json
+client_secrets*.json
+credentials.json
+*_credentials.json
 token.json
+*.sqlite
+*.sqlite3
+*.db
+*.sqlite-journal
+*.sqlite3-journal
+*.db-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
+*.db-wal
+*.db-shm
+/data/
+/secrets/
+/dashboard/playlist.json
 
 # generated files
 processed_videos.json
@@ -226,6 +246,7 @@ _notes/
 
 # generated reports
 reports/
+private-reports/
 yt_sub_playlist/reports/
 yt_sub_playlist/data/api_call_log.json
 

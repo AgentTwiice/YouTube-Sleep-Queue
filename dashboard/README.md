@@ -22,7 +22,7 @@ A static web preview for your YouTube playlist automation project.
 
 2. **Load your playlist**:
    - Click "Load Sample Data" to see example videos
-   - Or drag/drop your own `playlist.json` file
+   - Or drag/drop your own ignored `playlist.json` file
    - Or click "Load Playlist JSON" to browse for a file
 
 ## File Structure
@@ -32,9 +32,12 @@ dashboard/
 ├── index.html      # Main dashboard page
 ├── styles.css      # CSS styling
 ├── script.js       # JavaScript functionality
-├── playlist.json   # Sample playlist data
+├── playlist.example.json  # Empty, safe fallback data
+├── playlist.json          # Local generated data (gitignored)
 └── README.md       # This file
 ```
+
+`playlist.example.json` is the committed empty fallback. Generated or imported personal data is written to `playlist.json`, which is intentionally ignored by Git.
 
 ## JSON Format
 
@@ -86,7 +89,7 @@ Ready to add backend integration? The next phase will:
 ## Troubleshooting
 
 **Can't load sample data?**
-- Make sure `playlist.json` is in the same directory as `index.html`
+- Make sure `playlist.json` or `playlist.example.json` is in the same directory as `index.html`
 - Check browser console for errors
 
 **Videos not displaying correctly?**

@@ -38,11 +38,20 @@ data/
 
 # Secrets that must never end up in a layer
 secrets/
-client_secrets.json
+client_secret*.json
+client_secrets*.json
+credentials.json
+*_credentials.json
 token.json
 .env
 .env.*
 *.env
+*.sqlite
+*.sqlite3
+*.db
+*.sqlite-*
+*.sqlite3-*
+*.db-*
 
 # Git + CI metadata (not needed at runtime)
 .git/
