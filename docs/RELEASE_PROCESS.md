@@ -1,6 +1,6 @@
 # Release Process & Changelog Automation
 
-This document describes the automated release and changelog generation process for yt-sub-playlist.
+This document describes the automated release and changelog generation process for YouTube Sleep Queue.
 
 ## Quick Start
 

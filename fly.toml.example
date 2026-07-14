@@ -1,4 +1,4 @@
-# fly.toml.example — app-level config for yt-sub-playlist on Fly.io.
+# fly.toml.example — app-level config for YouTube Sleep Queue on Fly.io.
 #
 # Copy to fly.toml before running `fly launch --copy-config --no-deploy`.
 # The schedule, image pin, and volume attachment live on the machine itself
@@ -7,7 +7,7 @@
 #
 # See docs/deploy/fly.md for the full runbook.
 
-app = "yt-sub-playlist-yourname"   # replace with your chosen app name
+app = "youtube-sleep-queue-yourname"   # replace with your chosen app name
 primary_region = "iad"             # nearest Fly region; see `fly platform regions`
 
 [build]

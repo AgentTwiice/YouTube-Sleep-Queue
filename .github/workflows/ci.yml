@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - feature/sleep-queue
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.8.22"
+
+      - name: Install locked dependencies
+        run: uv sync --frozen --extra dashboard
+
+      - name: Run Python tests
+        run: uv run python -m unittest discover -s tests -v
+
+      - name: Run release updater tests
+        run: npm test
+
+      - name: Check JavaScript syntax
+        run: |
+          node --check dashboard/script.js
+          node --check dashboard/config.js
+          node --check dashboard/channels.js
+
+      - name: Validate lockfile
+        run: uv lock --check
+
+      - name: Build package
+        run: uv build
+
+      - name: Scan repository for committed secrets
+        run: uv run python scripts/check_repo_secrets.py

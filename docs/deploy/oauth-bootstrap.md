@@ -3,7 +3,7 @@
 One-time setup required before any deploy path. You'll end up with two files:
 
 - `client_secrets.json` — your GCP OAuth client credentials
-- `token.json` — a serialized credential object with access + refresh tokens
+- `token.json` — Google authorized-user JSON with access + refresh tokens
 
 Both files go to your deploy target. How they get there (env vars, bind mounts, fly secrets) is covered in the target-specific runbooks. This doc covers getting them.
 
@@ -13,7 +13,7 @@ Both files go to your deploy target. How they get there (env vars, bind mounts, 
 
 Visit [https://console.cloud.google.com](https://console.cloud.google.com).
 
-Top nav → project picker → **New Project**. Name it whatever — `yt-sub-playlist` works. Note the project ID; you'll need it if you ever want to manage quota via the CLI.
+Top nav → project picker → **New Project**. Name it whatever — `YouTube Sleep Queue` works. Note the project ID; you'll need it if you ever want to manage quota via the CLI.
 
 ---
 
@@ -78,8 +78,8 @@ After creation, click **Download JSON**. Rename the downloaded file to `client_s
 You need the repo on your laptop and `uv` installed ([https://docs.astral.sh/uv/](https://docs.astral.sh/uv/)).
 
 ```bash
-git clone https://github.com/keif/playlist-from-subs.git
-cd playlist-from-subs
+git clone https://github.com/AgentTwiice/YouTube-Sleep-Queue.git
+cd YouTube-Sleep-Queue
 uv sync
 ```
 
@@ -113,7 +113,7 @@ Two files at the repo root:
 
 ```
 client_secrets.json   ← OAuth client ID + secret (from GCP)
-token.json            ← serialized access + refresh token (from step 5)
+token.json            ← authorized-user JSON with access + refresh token (from step 5)
 ```
 
 **Do not commit either file.** Both are in `.gitignore`. The deploy runbooks walk you through uploading them to your chosen target.
@@ -122,7 +122,7 @@ token.json            ← serialized access + refresh token (from step 5)
 
 ## 7. Encoding for env-var targets
 
-Fly.io and GitHub Actions store these as secrets via environment variables. `token.json` despite its `.json` extension is a binary credentials serialization — raw env-var transit corrupts it on binary content. Both files are base64-encoded by convention so the contract is consistent.
+Fly.io and GitHub Actions store these as secrets via environment variables. Both files are JSON, and both are base64-encoded by convention so the secret-transfer contract is consistent and preserves the files exactly.
 
 When a runbook tells you to set a secret, use:
 

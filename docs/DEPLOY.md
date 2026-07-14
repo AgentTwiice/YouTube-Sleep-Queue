@@ -1,6 +1,6 @@
 # Deploy Your Own
 
-`yt-sub-playlist` is intentionally not a hosted SaaS. Each user brings their own
+YouTube Sleep Queue is intentionally not a hosted SaaS. Each user brings their own
 Google Cloud project, OAuth client, and YouTube API quota. There is no central
 infrastructure, no shared token store, no trust handoff. The tradeoff: you run
 it yourself.

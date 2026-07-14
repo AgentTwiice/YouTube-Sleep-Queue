@@ -10,7 +10,7 @@ Complete these in order before touching the workflow file.
 
 ### 1. Fork the repo
 
-Fork `keif/yt-sub-playlist` to your own GitHub account. The workflow lives in your fork — you own the secrets and the cron schedule.
+Fork `AgentTwiice/YouTube-Sleep-Queue` to your own GitHub account. The workflow lives in your fork — you own the secrets and the cron schedule.
 
 ### 2. Bootstrap OAuth locally
 
@@ -58,7 +58,7 @@ cp docs/deploy/cron-sync.example.yml .github/workflows/cron-sync.yml
 Open `cron-sync.yml` and replace `<version>` in the image reference with a real release tag:
 
 ```yaml
-ghcr.io/keif/yt-sub-playlist:v4.1.0   # pin to the version you want
+ghcr.io/agenttwiice/youtube-sleep-queue:v4.1.0   # pin to the version you want
 ```
 
 Pinning to a version tag rather than `:latest` means you opt in to upgrades explicitly.
@@ -156,4 +156,4 @@ The workflow file must live on the **default branch** of your fork. If you pushe
 
 ### `ModuleNotFoundError` in sync output
 
-The image tag you specified doesn't match a published release, or the image wasn't pulled successfully. Confirm the tag exists at `ghcr.io/keif/yt-sub-playlist` and that the image reference in your workflow matches exactly.
+The image tag you specified doesn't match a published release, or the image wasn't pulled successfully. Confirm the tag exists at `ghcr.io/agenttwiice/youtube-sleep-queue` and that the image reference in your workflow matches exactly.

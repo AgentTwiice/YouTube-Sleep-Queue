@@ -7,7 +7,7 @@
 
 The upstream code provides YouTube OAuth, quota-efficient subscription discovery, deterministic filtering, playlist management, CLI/dashboard surfaces, and deployment support.
 
-This fork adds local Ollama-based sleep-suitability scoring, score-based queue selection, SQLite run summaries and latest candidate state with versioned migrations, sleep-specific configuration, tests, documentation, and privacy protections. The original MIT licence and copyright notice are unchanged.
+This fork adds local Ollama-based sleep-suitability scoring, content/model-aware score caching, score-based queue selection, transactional SQLite run and candidate state with versioned migrations, standard JSON OAuth token storage, a same-origin/CSRF-hardened dashboard, sleep-specific configuration, CI and regression tests, documentation, and privacy protections. The original MIT licence and copyright notice are unchanged.
 
 ## Pulling future upstream changes
 
