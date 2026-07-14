@@ -1,8 +1,9 @@
 class PlaylistDashboard {
     constructor() {
         this.currentPlaylist = [];
-        this.apiBaseUrl = 'http://localhost:5001/api';
+        this.apiBaseUrl = `${window.location.origin}/api`;
         this.isBackendMode = false;
+        this.csrfToken = null;
         this.init();
     }
 
@@ -83,6 +84,7 @@ class PlaylistDashboard {
         try {
             const response = await fetch(`${this.apiBaseUrl}/status`);
             if (response.ok) {
+                await this.loadCsrfToken();
                 this.isBackendMode = true;
                 this.updateUIForBackendMode();
                 console.log('✅ Backend detected - API mode enabled');
@@ -96,6 +98,15 @@ class PlaylistDashboard {
             this.isBackendMode = false;
             this.updateUIForStaticMode();
         }
+    }
+
+    async loadCsrfToken() {
+        const response = await fetch(`${this.apiBaseUrl}/csrf-token`);
+        if (!response.ok) {
+            throw new Error('Could not initialize dashboard request protection');
+        }
+        const result = await response.json();
+        this.csrfToken = result.csrf_token;
     }
 
     updateUIForBackendMode() {
@@ -186,6 +197,7 @@ class PlaylistDashboard {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
+                    'X-CSRF-Token': this.csrfToken,
                 },
                 body: JSON.stringify({ dry_run: dryRun })
             });
@@ -293,28 +305,31 @@ class PlaylistDashboard {
         const card = document.createElement('div');
         card.className = 'video-card';
         
-        const thumbnailUrl = this.getYouTubeThumbnail(video.video_id);
+        const validVideoId = /^[A-Za-z0-9_-]{11}$/.test(video.video_id || '')
+            ? video.video_id
+            : null;
+        const thumbnailUrl = validVideoId ? this.getYouTubeThumbnail(validVideoId) : '';
         const publishDate = this.formatDate(video.published_at);
         const duration = this.formatDuration(video.duration_seconds);
-        const youtubeUrl = `https://www.youtube.com/watch?v=${video.video_id}`;
+        const youtubeUrl = validVideoId
+            ? `https://www.youtube.com/watch?v=${encodeURIComponent(validVideoId)}`
+            : '#';
 
         card.innerHTML = `
             <div class="video-thumbnail">
-                <img src="${thumbnailUrl}" alt="${video.title}" loading="lazy">
-                <div class="video-duration">${duration}</div>
+                <img loading="lazy">
+                <div class="video-duration"></div>
             </div>
             <div class="video-info">
                 <h3 class="video-title">
-                    <a href="${youtubeUrl}" target="_blank" rel="noopener noreferrer">
-                        ${this.escapeHtml(video.title)}
-                    </a>
+                    <a target="_blank" rel="noopener noreferrer"></a>
                 </h3>
                 <div class="video-meta">
-                    <div class="channel-name">${this.escapeHtml(video.channel_title)}</div>
-                    <div class="publish-date">${publishDate}</div>
+                    <div class="channel-name"></div>
+                    <div class="publish-date"></div>
                 </div>
                 <div class="video-actions">
-                    <a href="${youtubeUrl}" target="_blank" class="watch-button">
+                    <a target="_blank" rel="noopener noreferrer" class="watch-button">
                         ▶️ Watch
                     </a>
                     <span class="video-status ${video.added ? 'added' : 'not-added'}">
@@ -323,6 +338,16 @@ class PlaylistDashboard {
                 </div>
             </div>
         `;
+
+        const image = card.querySelector('img');
+        image.src = thumbnailUrl;
+        image.alt = String(video.title || 'Untitled video');
+        card.querySelector('.video-duration').textContent = duration;
+        card.querySelector('.video-title a').href = youtubeUrl;
+        card.querySelector('.video-title a').textContent = String(video.title || 'Untitled video');
+        card.querySelector('.channel-name').textContent = String(video.channel_title || 'Unknown channel');
+        card.querySelector('.publish-date').textContent = publishDate;
+        card.querySelector('.watch-button').href = youtubeUrl;
 
         return card;
     }

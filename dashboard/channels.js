@@ -10,6 +10,7 @@ let filteredChannels = [];
 let selectedChannelIds = new Set();
 let currentMode = 'none';
 let searchQuery = '';
+let csrfToken = null;
 
 // DOM elements
 const elements = {
@@ -28,7 +29,16 @@ const elements = {
 };
 
 // API endpoints
-const API_BASE = 'http://localhost:5001/api';
+const API_BASE = `${window.location.origin}/api`;
+
+async function getCsrfToken() {
+    if (csrfToken) return csrfToken;
+    const response = await fetch(`${API_BASE}/csrf-token`);
+    if (!response.ok) throw new Error('Could not initialize request protection');
+    const data = await response.json();
+    csrfToken = data.csrf_token;
+    return csrfToken;
+}
 
 /**
  * Initialize the application
@@ -49,6 +59,8 @@ async function init() {
 
     // Set up event listeners
     setupEventListeners();
+
+    await getCsrfToken();
 
     // Load current configuration
     await loadFilterConfig();
@@ -340,7 +352,8 @@ async function saveConfiguration() {
         const response = await fetch(`${API_BASE}/channels/filter-config`, {
             method: 'PUT',
             headers: {
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': await getCsrfToken()
             },
             body: JSON.stringify(payload)
         });

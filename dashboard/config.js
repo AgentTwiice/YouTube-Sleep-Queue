@@ -1,6 +1,23 @@
 // Configuration Page JavaScript
 
-const API_BASE = 'http://localhost:5001';
+const API_BASE = window.location.origin;
+let csrfToken = null;
+
+async function getCsrfToken() {
+    if (csrfToken) return csrfToken;
+    const response = await fetch(`${API_BASE}/api/csrf-token`);
+    if (!response.ok) throw new Error('Could not initialize request protection');
+    const data = await response.json();
+    csrfToken = data.csrf_token;
+    return csrfToken;
+}
+
+async function protectedHeaders() {
+    return {
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': await getCsrfToken()
+    };
+}
 
 // DOM Elements
 const elements = {
@@ -23,6 +40,11 @@ const elements = {
     maxVideos: document.getElementById('maxVideos'),
     maxVideosValue: document.getElementById('maxVideosValue'),
     skipLiveContent: document.getElementById('skipLiveContent'),
+    ollamaBaseUrl: document.getElementById('ollamaBaseUrl'),
+    ollamaModel: document.getElementById('ollamaModel'),
+    ollamaTimeout: document.getElementById('ollamaTimeout'),
+    sleepMinimumScore: document.getElementById('sleepMinimumScore'),
+    sleepQueueSize: document.getElementById('sleepQueueSize'),
     keywordFilterMode: document.getElementById('keywordFilterMode'),
     keywordIncludeGroup: document.getElementById('keywordIncludeGroup'),
     keywordExcludeGroup: document.getElementById('keywordExcludeGroup'),
@@ -44,7 +66,8 @@ const elements = {
 };
 
 // Initialize
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
+    await getCsrfToken();
     loadConfiguration();
     loadStats();
     setupEventListeners();
@@ -81,6 +104,11 @@ async function loadConfiguration() {
 
             elements.maxVideos.value = config.max_videos || 50;
             elements.skipLiveContent.checked = config.skip_live_content !== false;
+            elements.ollamaBaseUrl.value = config.ollama_base_url || 'http://localhost:11434';
+            elements.ollamaModel.value = config.ollama_model || 'llama3.2:3b';
+            elements.ollamaTimeout.value = config.ollama_timeout_seconds || 30;
+            elements.sleepMinimumScore.value = config.sleep_minimum_score ?? 70;
+            elements.sleepQueueSize.value = config.sleep_queue_size || 10;
 
             // Keyword filter settings
             elements.keywordFilterMode.value = config.keyword_filter_mode || 'none';
@@ -250,7 +278,12 @@ function getConfigFromForm() {
         min_duration_seconds: parseInt(elements.minDuration.value),
         lookback_hours: parseInt(elements.lookbackHours.value),
         max_videos: parseInt(elements.maxVideos.value),
-        skip_live_content: elements.skipLiveContent.checked
+        skip_live_content: elements.skipLiveContent.checked,
+        ollama_base_url: elements.ollamaBaseUrl.value.trim(),
+        ollama_model: elements.ollamaModel.value.trim(),
+        ollama_timeout_seconds: parseInt(elements.ollamaTimeout.value),
+        sleep_minimum_score: parseFloat(elements.sleepMinimumScore.value),
+        sleep_queue_size: parseInt(elements.sleepQueueSize.value)
     };
 
     // Only include max_duration_seconds if not unlimited
@@ -304,9 +337,7 @@ async function saveConfiguration() {
 
         const response = await fetch(`${API_BASE}/api/config`, {
             method: 'PUT',
-            headers: {
-                'Content-Type': 'application/json'
-            },
+            headers: await protectedHeaders(),
             body: JSON.stringify(config)
         });
 
@@ -338,9 +369,7 @@ async function previewChanges() {
         // First validate the config
         const validateResponse = await fetch(`${API_BASE}/api/config/validate`, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
+            headers: await protectedHeaders(),
             body: JSON.stringify(config)
         });
 
@@ -374,7 +403,9 @@ async function resetToDefaults() {
         setLoading(true);
 
         const response = await fetch(`${API_BASE}/api/config/reset`, {
-            method: 'POST'
+            method: 'POST',
+            headers: await protectedHeaders(),
+            body: JSON.stringify({})
         });
 
         const data = await response.json();

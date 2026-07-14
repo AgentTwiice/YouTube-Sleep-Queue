@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Configuration - YouTube Playlist Dashboard</title>
+    <title>Configuration - YouTube Sleep Queue</title>
     <link rel="stylesheet" href="styles.css">
     <script src="https://unpkg.com/lucide@latest"></script>
     <style>
@@ -241,7 +241,7 @@
             <h2>Playlist Settings</h2>
             <div class="form-group">
                 <label for="playlistName">Playlist Name</label>
-                <input type="text" id="playlistName" placeholder="Auto Playlist from Subscriptions">
+                <input type="text" id="playlistName" placeholder="YouTube Sleep Queue">
             </div>
             <div class="form-group">
                 <label for="playlistVisibility">Visibility</label>
@@ -250,6 +250,31 @@
                     <option value="unlisted">Unlisted</option>
                     <option value="public">Public</option>
                 </select>
+            </div>
+        </div>
+
+        <!-- Sleep Ranking -->
+        <div class="config-section">
+            <h2>Sleep Ranking</h2>
+            <div class="form-group">
+                <label for="ollamaBaseUrl">Ollama Base URL</label>
+                <input type="text" id="ollamaBaseUrl" placeholder="http://localhost:11434">
+            </div>
+            <div class="form-group">
+                <label for="ollamaModel">Ollama Model</label>
+                <input type="text" id="ollamaModel" placeholder="llama3.2:3b">
+            </div>
+            <div class="form-group">
+                <label for="ollamaTimeout">Ollama Timeout (seconds)</label>
+                <input type="number" id="ollamaTimeout" min="1" max="300" value="30">
+            </div>
+            <div class="form-group">
+                <label for="sleepMinimumScore">Minimum Sleep Score</label>
+                <input type="number" id="sleepMinimumScore" min="0" max="100" step="0.5" value="70">
+            </div>
+            <div class="form-group">
+                <label for="sleepQueueSize">Queue Size</label>
+                <input type="number" id="sleepQueueSize" min="1" max="200" value="10">
             </div>
         </div>
 

@@ -10,11 +10,11 @@ This module manages the OAuth2 flow for YouTube API access, including:
 
 import logging
 import os
-import pickle
 from pathlib import Path
 
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
@@ -29,6 +29,42 @@ SCOPES = [
 # Authentication file paths
 TOKEN_FILE = "token.json"
 CREDENTIALS_FILE = "client_secrets.json"
+
+
+def _load_stored_credentials():
+    """Load OAuth credentials from Google's authorized-user JSON format."""
+    if not os.path.exists(TOKEN_FILE):
+        return None
+
+    try:
+        credentials = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+        logger.debug("Loaded existing credentials from %s", TOKEN_FILE)
+        return credentials
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        logger.error("The stored token file is not valid authorized-user JSON: %s", exc)
+        logger.error(
+            "Legacy pickle tokens are no longer supported. Delete %s and run "
+            "'python -m yt_sub_playlist.auth.oauth' to authenticate again.",
+            TOKEN_FILE,
+        )
+        raise SystemExit(1) from exc
+
+
+def _save_credentials(credentials) -> None:
+    """Atomically persist OAuth credentials as private JSON."""
+    token_path = Path(TOKEN_FILE)
+    temporary_path = token_path.with_name(f".{token_path.name}.tmp")
+    try:
+        temporary_path.write_text(credentials.to_json(), encoding="utf-8")
+        try:
+            temporary_path.chmod(0o600)
+        except OSError:
+            logger.debug("Could not tighten permissions on %s", temporary_path)
+        temporary_path.replace(token_path)
+        logger.debug("Credentials saved to %s", TOKEN_FILE)
+    except OSError as exc:
+        temporary_path.unlink(missing_ok=True)
+        logger.warning("Failed to save credentials: %s", exc)
 
 
 def get_authenticated_service():
@@ -47,17 +83,7 @@ def get_authenticated_service():
     Raises:
         SystemExit: If authentication fails completely
     """
-    creds = None
-
-    # Load existing token if it exists
-    if os.path.exists(TOKEN_FILE):
-        try:
-            with open(TOKEN_FILE, "rb") as token:
-                creds = pickle.load(token)
-            logger.debug(f"Loaded existing credentials from {TOKEN_FILE}")
-        except Exception as e:
-            logger.warning(f"Failed to load token file: {e}")
-            creds = None
+    creds = _load_stored_credentials()
 
     # If there are no valid credentials, refresh or get new ones
     if not creds or not creds.valid:
@@ -91,12 +117,7 @@ def get_authenticated_service():
                 raise SystemExit(1)
 
         # Save the credentials for the next run
-        try:
-            with open(TOKEN_FILE, "wb") as token:
-                pickle.dump(creds, token)
-            logger.debug(f"Credentials saved to {TOKEN_FILE}")
-        except Exception as e:
-            logger.warning(f"Failed to save credentials: {e}")
+        _save_credentials(creds)
 
     try:
         service = build("youtube", "v3", credentials=creds)

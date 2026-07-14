@@ -12,6 +12,8 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from yt_sub_playlist.config.schema import ConfigSchema
+
 logger = logging.getLogger(__name__)
 
 # Default configuration file location
@@ -28,26 +30,8 @@ class ConfigManager:
 
     # Default user preferences
     DEFAULT_CONFIG = {
-        "playlist_name": "Auto Playlist from Subscriptions",
-        "playlist_visibility": "unlisted",
-        "min_duration_seconds": 60,
-        "lookback_hours": 24,
-        "max_videos": 50,
-        "skip_live_content": True,
+        **ConfigSchema.DEFAULTS,
         "channel_whitelist": None,  # Legacy - kept for backward compatibility
-        "channel_filter_mode": "none",
-        "channel_allowlist": None,
-        "channel_blocklist": None
-    }
-
-    # Validation ranges
-    VALIDATION_RULES = {
-        "min_duration_seconds": {"min": 0, "max": 86400, "type": int},
-        "lookback_hours": {"min": 1, "max": 168, "type": int},
-        "max_videos": {"min": 1, "max": 200, "type": int},
-        "playlist_visibility": {"options": ["private", "unlisted", "public"]},
-        "skip_live_content": {"type": bool},
-        "channel_filter_mode": {"options": ["none", "allowlist", "blocklist"]}
     }
 
     def __init__(self, config_file: Optional[Path] = None):
@@ -138,85 +122,12 @@ class ConfigManager:
         Returns:
             Dict with 'valid' boolean and list of 'errors'
         """
-        errors = []
+        try:
+            ConfigSchema.validate_config(config)
+        except (TypeError, ValueError) as exc:
+            return {"valid": False, "errors": [str(exc)]}
 
-        for key, rules in self.VALIDATION_RULES.items():
-            if key not in config:
-                continue
-
-            value = config[key]
-
-            # Type validation
-            if "type" in rules:
-                if not isinstance(value, rules["type"]):
-                    errors.append(f"{key} must be {rules['type'].__name__}, got {type(value).__name__}")
-                    continue
-
-            # Range validation for integers
-            if "min" in rules and "max" in rules:
-                if not isinstance(value, int):
-                    errors.append(f"{key} must be an integer")
-                elif value < rules["min"] or value > rules["max"]:
-                    errors.append(f"{key} must be between {rules['min']} and {rules['max']}")
-
-            # Options validation
-            if "options" in rules:
-                if value not in rules["options"]:
-                    errors.append(f"{key} must be one of: {', '.join(rules['options'])}")
-
-        # Validate channel_whitelist format (legacy)
-        if "channel_whitelist" in config:
-            whitelist = config["channel_whitelist"]
-            if whitelist is not None:
-                if not isinstance(whitelist, list):
-                    errors.append("channel_whitelist must be a list or null")
-                else:
-                    if not all(isinstance(ch, str) for ch in whitelist):
-                        errors.append("channel_whitelist must contain only strings")
-
-        # Validate channel_allowlist format
-        if "channel_allowlist" in config:
-            allowlist = config["channel_allowlist"]
-            if allowlist is not None:
-                if not isinstance(allowlist, list):
-                    errors.append("channel_allowlist must be a list or null")
-                else:
-                    if not all(isinstance(ch, str) for ch in allowlist):
-                        errors.append("channel_allowlist must contain only strings")
-
-        # Validate channel_blocklist format
-        if "channel_blocklist" in config:
-            blocklist = config["channel_blocklist"]
-            if blocklist is not None:
-                if not isinstance(blocklist, list):
-                    errors.append("channel_blocklist must be a list or null")
-                else:
-                    if not all(isinstance(ch, str) for ch in blocklist):
-                        errors.append("channel_blocklist must contain only strings")
-
-        # Validate channel filter mode consistency
-        mode = config.get("channel_filter_mode", "none")
-        allowlist = config.get("channel_allowlist")
-        blocklist = config.get("channel_blocklist")
-
-        if allowlist and blocklist:
-            # Check for conflicts
-            allowlist_set = set(allowlist) if allowlist else set()
-            blocklist_set = set(blocklist) if blocklist else set()
-            conflicts = allowlist_set & blocklist_set
-            if conflicts:
-                errors.append(f"Channels cannot be in both allowlist and blocklist")
-
-        if mode == "allowlist" and blocklist:
-            errors.append("Cannot use blocklist when filter mode is 'allowlist'")
-
-        if mode == "blocklist" and allowlist:
-            errors.append("Cannot use allowlist when filter mode is 'blocklist'")
-
-        return {
-            "valid": len(errors) == 0,
-            "errors": errors
-        }
+        return {"valid": True, "errors": []}
 
     def get_defaults(self) -> Dict[str, Any]:
         """
@@ -329,5 +240,11 @@ class ConfigManager:
                 "max_videos": config["max_videos"],
                 "skip_live_content": config["skip_live_content"]
             },
-            "channel_filter": channel_filter_summary
+            "channel_filter": channel_filter_summary,
+            "sleep_ranking": {
+                "ollama_base_url": config["ollama_base_url"],
+                "ollama_model": config["ollama_model"],
+                "minimum_score": config["sleep_minimum_score"],
+                "queue_size": config["sleep_queue_size"],
+            },
         }

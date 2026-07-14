@@ -8,6 +8,7 @@ Integrates with the existing yt_sub_playlist CLI tool for data generation.
 import json
 import logging
 import os
+import secrets
 import subprocess
 import sys
 from datetime import datetime
@@ -15,7 +16,6 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional
 
 from flask import Flask, jsonify, request, send_from_directory
-from flask_cors import CORS, cross_origin
 
 # Add the parent directory to Python path to import yt_sub_playlist
 sys.path.append(str(Path(__file__).parent.parent.parent))
@@ -35,19 +35,37 @@ from channels_api import channels_bp
 from stats_api import stats_bp
 
 app = Flask(__name__)
-# Enable CORS for frontend development - permissive for local development
-CORS(app, resources={
-    r"/*": {
-        "origins": "*",  # Allow all origins for local development
-        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"]
-    }
-})
+app.config["CSRF_TOKEN"] = secrets.token_urlsafe(32)
 
 # Register blueprints
 app.register_blueprint(config_bp)
 app.register_blueprint(channels_bp)
 app.register_blueprint(stats_bp)
+
+
+@app.before_request
+def protect_mutating_api_requests():
+    """Require same-origin JSON requests with a per-process CSRF token."""
+    if not request.path.startswith("/api/") or request.method not in {
+        "POST", "PUT", "PATCH", "DELETE"
+    }:
+        return None
+
+    if not request.is_json:
+        return jsonify({"success": False, "error": "Request must be JSON"}), 415
+
+    origin = request.headers.get("Origin")
+    expected_origin = request.host_url.rstrip("/")
+    if origin and origin.rstrip("/") != expected_origin:
+        return jsonify({"success": False, "error": "Cross-origin request rejected"}), 403
+
+    supplied_token = request.headers.get("X-CSRF-Token", "")
+    if not supplied_token or not secrets.compare_digest(
+        supplied_token, app.config["CSRF_TOKEN"]
+    ):
+        return jsonify({"success": False, "error": "Invalid CSRF token"}), 403
+
+    return None
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -285,6 +303,12 @@ def get_playlist():
             'timestamp': datetime.now().isoformat()
         }), 500
 
+
+@app.route('/api/csrf-token', methods=['GET'])
+def get_csrf_token():
+    """Return the token required for same-origin mutating API requests."""
+    return jsonify({"success": True, "csrf_token": app.config["CSRF_TOKEN"]})
+
 @app.route('/api/refresh', methods=['POST'])
 def refresh_playlist():
     """Refresh playlist data by running the CLI tool."""
@@ -306,7 +330,6 @@ def refresh_playlist():
         }), 500
 
 @app.route('/api/status', methods=['GET'])
-@cross_origin()
 def get_status():
     """Get system status and health check."""
     try:
