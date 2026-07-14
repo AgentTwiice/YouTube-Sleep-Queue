@@ -103,17 +103,25 @@ Back in the terminal you'll see:
 Authentication successful for channel: <your channel name>
 ```
 
-A `token.json` file is now written to the repo root.
+A `token.json` file is now written atomically to the shared data directory,
+`yt_sub_playlist/data/` by default. A root-level token from an older release is
+still read as a migration fallback.
+
+The application requests the minimal scopes needed to read subscriptions and
+manage playlist items: `youtube.readonly` and `youtube.force-ssl`. If you have a
+token created with the former broad `youtube` scope, remove the existing token
+and repeat this step so Google issues a grant for the reduced scope set.
 
 ---
 
 ## 6. What you have
 
-Two files at the repo root:
+The OAuth client remains at the repository root; the authorized-user token is
+stored at `yt_sub_playlist/data/token.json` by default.
 
 ```
-client_secrets.json   ← OAuth client ID + secret (from GCP)
-token.json            ← authorized-user JSON with access + refresh token (from step 5)
+client_secrets.json                    ← OAuth client ID + secret (from GCP)
+yt_sub_playlist/data/token.json        ← authorized-user access + refresh token
 ```
 
 **Do not commit either file.** Both are in `.gitignore`. The deploy runbooks walk you through uploading them to your chosen target.
@@ -128,7 +136,7 @@ When a runbook tells you to set a secret, use:
 
 ```bash
 base64 < client_secrets.json
-base64 < token.json
+base64 < yt_sub_playlist/data/token.json
 ```
 
 The deploy target's entrypoint shim decodes them back to disk before the app starts.
@@ -145,10 +153,10 @@ To recover:
 
 1. On your laptop, in the repo clone from step 5:
    ```bash
-   rm token.json
+   rm yt_sub_playlist/data/token.json
    uv run python -m yt_sub_playlist.auth.oauth
    ```
 2. Complete the consent flow again (same browser step as above).
-3. Re-upload the new `token.json` to your deploy target per that target's runbook (re-encode with `base64 < token.json` first if the target uses env-var secrets).
+3. Re-upload the new `token.json` to your deploy target per that target's runbook (re-encode with `base64 < yt_sub_playlist/data/token.json` first if the target uses env-var secrets).
 
 The re-auth process is identical to the initial bootstrap. No GCP changes needed — the OAuth client and consent screen configuration persist.

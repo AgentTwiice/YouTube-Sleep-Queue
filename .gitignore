@@ -218,6 +218,14 @@ client_secrets*.json
 credentials.json
 *_credentials.json
 token.json
+[Tt][Oo][Kk][Ee][Nn].[Jj][Ss][Oo][Nn]*
+.[Tt][Oo][Kk][Ee][Nn].[Jj][Ss][Oo][Nn]*
+*[Tt][Oo][Kk][Ee][Nn]*.[Tt][Mm][Pp]
+*[Tt][Oo][Kk][Ee][Nn]*.[Bb][Aa][Kk]
+*[Tt][Oo][Kk][Ee][Nn]*.[Bb][Aa][Cc][Kk][Uu][Pp]
+*[Cc][Ll][Ii][Ee][Nn][Tt]_[Ss][Ee][Cc][Rr][Ee][Tt]*.[Jj][Ss][Oo][Nn]*
+*[Cc][Ll][Ii][Ee][Nn][Tt]_[Ss][Ee][Cc][Rr][Ee][Tt][Ss]*.[Jj][Ss][Oo][Nn]*
+*[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll][Ss].[Jj][Ss][Oo][Nn]*
 *.sqlite
 *.sqlite3
 *.db

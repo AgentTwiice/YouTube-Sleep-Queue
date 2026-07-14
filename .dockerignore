@@ -43,6 +43,13 @@ client_secrets*.json
 credentials.json
 *_credentials.json
 token.json
+[Tt][Oo][Kk][Ee][Nn].[Jj][Ss][Oo][Nn]*
+.[Tt][Oo][Kk][Ee][Nn].[Jj][Ss][Oo][Nn]*
+*[Tt][Oo][Kk][Ee][Nn]*.[Tt][Mm][Pp]
+*[Tt][Oo][Kk][Ee][Nn]*.[Bb][Aa][Kk]
+*[Cc][Ll][Ii][Ee][Nn][Tt]_[Ss][Ee][Cc][Rr][Ee][Tt]*.[Jj][Ss][Oo][Nn]*
+*[Cc][Ll][Ii][Ee][Nn][Tt]_[Ss][Ee][Cc][Rr][Ee][Tt][Ss]*.[Jj][Ss][Oo][Nn]*
+*[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll][Ss].[Jj][Ss][Oo][Nn]*
 .env
 .env.*
 *.env
@@ -76,4 +83,3 @@ docs/superpowers/
 # Templates (out-of-scope for v1, but excluded to keep image lean)
 templates/
 web/
-dashboard/

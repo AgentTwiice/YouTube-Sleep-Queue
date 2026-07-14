@@ -37,12 +37,10 @@ services:
       - ./data:/data
 
   # ---------------------------------------------------------------------------
-  # The Flask dashboard is intentionally NOT shipped in the cron-job image.
-  # The dashboard backend uses cwd-relative imports (no __init__.py in
-  # dashboard/backend/) that make it awkward to launch from the package-only
-  # image this Dockerfile produces. Recommended v1 pattern: run the dashboard
-  # locally on your laptop with `uv run`, pointed at the same ./data directory
-  # (mount via sshfs/Tailscale if the data lives on a remote VPS).
+  # The Flask dashboard is intentionally NOT installed in the cron-job image:
+  # its dependencies are an optional extra and it has no user authentication.
+  # Run the packaged dashboard locally with `uv run python -m
+  # dashboard.backend.run`, pointed at the same data directory.
   #
   # A future spec will cover dashboard deploy with a proper auth layer. See
   # `docs/superpowers/specs/2026-06-28-deploy-your-own-design.md`
