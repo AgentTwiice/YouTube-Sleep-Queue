@@ -10,7 +10,7 @@ This module handles filtering videos based on various criteria:
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set
 
 from ..config.env_loader import VideoCache
@@ -18,57 +18,21 @@ from ..config.env_loader import VideoCache
 logger = logging.getLogger(__name__)
 
 
-def get_published_after_timestamp(lookback_hours: int) -> str:
-    """
-    Get RFC 3339 timestamp for videos published after lookback period.
-    
-    Args:
-        lookback_hours: Number of hours to look back from now
-        
-    Returns:
-        RFC 3339 formatted timestamp string for YouTube API
-    """
-    published_after = datetime.utcnow() - timedelta(hours=lookback_hours)
-    return published_after.strftime('%Y-%m-%dT%H:%M:%SZ')
-
-
-def parse_channel_whitelist(whitelist_str: Optional[str]) -> Optional[Set[str]]:
-    """
-    Parse comma-separated channel ID whitelist from environment variable.
-    
-    Args:
-        whitelist_str: Comma-separated string of channel IDs, or None
-        
-    Returns:
-        Set of channel IDs, or None if no whitelist specified
-    """
-    if not whitelist_str or not whitelist_str.strip():
-        return None
-    
-    channel_ids = {
-        channel_id.strip() 
-        for channel_id in whitelist_str.split(',') 
-        if channel_id.strip()
-    }
-    
-    return channel_ids if channel_ids else None
-
-
 class VideoFilter:
     """
     Comprehensive video filtering system.
-    
+
     Filters videos based on configurable criteria including:
     - Minimum duration requirements
     - Channel whitelist restrictions
     - Live content filtering
     - Duplicate processing prevention
     """
-    
+
     def __init__(self, config: Dict[str, Any], cache: VideoCache):
         """
         Initialize video filter with configuration and cache.
-        
+
         Args:
             config: Configuration dictionary with filtering settings
             cache: VideoCache instance for tracking processed videos
@@ -76,7 +40,7 @@ class VideoFilter:
         self.config = config
         self.cache = cache
         self.stats = self._init_stats()
-    
+
     def _init_stats(self) -> Dict[str, int]:
         """Initialize filtering statistics."""
         return {
@@ -93,11 +57,9 @@ class VideoFilter:
             "live_content_skipped": 0,
             "passed_filters": 0,
         }
-    
+
     def filter_videos(
-        self,
-        videos: List[Dict[str, Any]],
-        channel_whitelist: Optional[Set[str]] = None
+        self, videos: List[Dict[str, Any]], channel_whitelist: Optional[Set[str]] = None
     ) -> List[Dict[str, Any]]:
         """
         Filter videos based on all configured criteria.
@@ -127,7 +89,9 @@ class VideoFilter:
             allowlist = channel_whitelist
 
         for video in videos:
-            if not self._should_include_video(video, filter_mode, allowlist, blocklist, min_duration, max_duration):
+            if not self._should_include_video(
+                video, filter_mode, allowlist, blocklist, min_duration, max_duration
+            ):
                 continue
 
             # Video passed all filters
@@ -141,7 +105,7 @@ class VideoFilter:
 
         self._log_filtering_stats(filter_mode, allowlist, blocklist, min_duration, max_duration)
         return filtered
-    
+
     def _should_include_video(
         self,
         video: Dict[str, Any],
@@ -149,7 +113,7 @@ class VideoFilter:
         allowlist: Optional[Set[str]],
         blocklist: Optional[Set[str]],
         min_duration: int,
-        max_duration: Optional[int] = None
+        max_duration: Optional[int] = None,
     ) -> bool:
         """
         Check if a video should be included based on all filters.
@@ -251,15 +215,19 @@ class VideoFilter:
         # Parse published date
         try:
             # Handle both RFC 3339 format (with Z) and ISO format
-            if published_at_str.endswith('Z'):
-                published_at = datetime.strptime(published_at_str, '%Y-%m-%dT%H:%M:%SZ')
+            if published_at_str.endswith("Z"):
+                published_at = datetime.strptime(published_at_str, "%Y-%m-%dT%H:%M:%SZ").replace(
+                    tzinfo=timezone.utc
+                )
             else:
-                published_at = datetime.fromisoformat(published_at_str.replace('Z', '+00:00'))
+                published_at = datetime.fromisoformat(published_at_str.replace("Z", "+00:00"))
         except ValueError:
             logger.warning(f"Could not parse published_at date: {published_at_str}")
             return True
 
-        now = datetime.utcnow()
+        if published_at.tzinfo is None:
+            published_at = published_at.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
 
         if date_mode == "lookback":
             # Use lookback_hours (default behavior)
@@ -285,8 +253,8 @@ class VideoFilter:
                 return True
 
             try:
-                start_date = datetime.strptime(start_str, "%Y-%m-%d")
-                end_date = datetime.strptime(end_str, "%Y-%m-%d")
+                start_date = datetime.strptime(start_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                end_date = datetime.strptime(end_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
                 # Set end_date to end of day (23:59:59)
                 end_date = end_date.replace(hour=23, minute=59, second=59)
 
@@ -370,10 +338,10 @@ class VideoFilter:
         allowlist: Optional[Set[str]],
         blocklist: Optional[Set[str]],
         min_duration: int,
-        max_duration: Optional[int] = None
+        max_duration: Optional[int] = None,
     ) -> None:
         """Log comprehensive filtering statistics."""
-        logger.info(f"Video filtering stats:")
+        logger.info("Video filtering stats:")
         logger.info(f"  Total videos: {self.stats['total']}")
         logger.info(f"  Already processed: {self.stats['already_processed']}")
 
@@ -385,14 +353,16 @@ class VideoFilter:
             logger.info(f"  Too short (<{min_duration}s): {self.stats['too_short']}")
 
         # Date filtering stats
-        if self.stats['outside_date_range'] > 0:
+        if self.stats["outside_date_range"] > 0:
             date_mode = self.config.get("date_filter_mode", "lookback")
-            logger.info(f"  Outside date range ({date_mode} mode): {self.stats['outside_date_range']}")
+            logger.info(
+                f"  Outside date range ({date_mode} mode): {self.stats['outside_date_range']}"
+            )
 
         # Keyword filtering stats
-        if self.stats['keyword_filtered_include'] > 0:
+        if self.stats["keyword_filtered_include"] > 0:
             logger.info(f"  Keyword filtered (include): {self.stats['keyword_filtered_include']}")
-        if self.stats['keyword_filtered_exclude'] > 0:
+        if self.stats["keyword_filtered_exclude"] > 0:
             logger.info(f"  Keyword filtered (exclude): {self.stats['keyword_filtered_exclude']}")
 
         if filter_mode == "allowlist" and allowlist:
@@ -404,29 +374,12 @@ class VideoFilter:
             logger.info(f"  Live content skipped: {self.stats['live_content_skipped']}")
 
         logger.info(f"  Passed filters: {self.stats['passed_filters']}")
-    
+
     def get_filtering_stats(self) -> Dict[str, int]:
         """
         Get the current filtering statistics.
-        
+
         Returns:
             Dictionary of filtering statistics
         """
         return self.stats.copy()
-
-
-# Legacy function for backward compatibility
-def filter_videos(
-    videos: List[Dict[str, Any]],
-    config: Dict[str, Any],
-    cache: VideoCache,
-    channel_whitelist: Optional[Set[str]] = None,
-) -> List[Dict[str, Any]]:
-    """
-    Legacy filter function for backward compatibility.
-    
-    This function maintains compatibility with existing code while
-    using the new VideoFilter class internally.
-    """
-    filter_instance = VideoFilter(config, cache)
-    return filter_instance.filter_videos(videos, channel_whitelist)

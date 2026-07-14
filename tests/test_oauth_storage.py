@@ -31,7 +31,7 @@ class OAuthStorageTests(unittest.TestCase):
             token_path = Path(directory) / "token.json"
             token_path.write_bytes(b"\x80\x04legacy-pickle")
             with patch.object(oauth, "TOKEN_FILE", str(token_path)):
-                with self.assertRaises(SystemExit):
+                with self.assertRaises(oauth.YouTubeAuthenticationError):
                     oauth._load_stored_credentials()
 
 

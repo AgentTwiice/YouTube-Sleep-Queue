@@ -1,490 +1,356 @@
-"""
-Configuration schema and validation.
+"""Authoritative configuration defaults, parsing, and validation."""
 
-This module defines the configuration contract for the application,
-including default values, validation rules, and type definitions.
-"""
+from __future__ import annotations
 
-from datetime import datetime
-from typing import Any, Dict, Optional, Set
+import re
+from datetime import date, datetime, time, timedelta, timezone
+from typing import Any, Mapping
 from urllib.parse import urlparse
+
+CHANNEL_ID_PATTERN = re.compile(r"^UC[A-Za-z0-9_-]{22}$")
 
 
 class ConfigSchema:
-    """
-    Configuration schema definition and validation.
-    
-    Defines the expected configuration structure, default values,
-    and validation rules for the application.
-    """
-    
-    # Default configuration values
-    DEFAULTS = {
+    """Single contract used by files, environment variables, and the dashboard."""
+
+    DEFAULTS: dict[str, Any] = {
         "playlist_name": "YouTube Sleep Queue",
         "playlist_visibility": "unlisted",
         "min_duration_seconds": 60,
-        "max_duration_seconds": None,  # None = unlimited
+        "max_duration_seconds": None,
         "lookback_hours": 24,
-        "date_filter_mode": "lookback",  # "lookback", "days", "date_range"
-        "date_filter_days": None,        # Override lookback_hours with "last N days"
-        "date_filter_start": None,       # YYYY-MM-DD
-        "date_filter_end": None,         # YYYY-MM-DD
+        "date_filter_mode": "lookback",
+        "date_filter_days": None,
+        "date_filter_start": None,
+        "date_filter_end": None,
         "max_videos": 50,
         "skip_live_content": True,
         "channel_filter_mode": "none",
         "channel_allowlist": None,
         "channel_blocklist": None,
-        "keyword_filter_mode": "none",   # "none", "include", "exclude", "both"
-        "keyword_include": None,         # List of keywords to include
-        "keyword_exclude": None,         # List of keywords to exclude
-        "keyword_match_type": "any",     # "any" or "all"
+        "keyword_filter_mode": "none",
+        "keyword_include": None,
+        "keyword_exclude": None,
+        "keyword_match_type": "any",
         "keyword_case_sensitive": False,
-        "keyword_search_description": False,  # Search in description too
+        "keyword_search_description": False,
         "ollama_base_url": "http://localhost:11434",
         "ollama_model": "llama3.2:3b",
         "ollama_timeout_seconds": 30,
+        "ollama_concurrency": 1,
         "sleep_minimum_score": 70.0,
         "sleep_queue_size": 10,
+        "refresh_timeout_seconds": None,
     }
-    
-    # Required configuration keys
-    OPTIONAL_KEYS = {
-        "playlist_id",
-        "playlist_name",
-        "playlist_visibility",
-        "min_duration_seconds",
-        "max_duration_seconds",
-        "lookback_hours",
-        "date_filter_mode",
-        "date_filter_days",
-        "date_filter_start",
-        "date_filter_end",
-        "channel_whitelist",  # Legacy - kept for backward compatibility
-        "channel_filter_mode",
-        "channel_allowlist",
-        "channel_blocklist",
-        "keyword_filter_mode",
-        "keyword_include",
-        "keyword_exclude",
-        "keyword_match_type",
-        "keyword_case_sensitive",
-        "keyword_search_description",
-        "max_videos",
-        "skip_live_content",
-        "ollama_base_url",
-        "ollama_model",
-        "ollama_timeout_seconds",
-        "sleep_minimum_score",
-        "sleep_queue_size",
+    LEGACY_KEYS = {"channel_whitelist"}
+    RUNTIME_KEYS = {"playlist_id"}
+    USER_KEYS = frozenset(DEFAULTS) | LEGACY_KEYS
+    ALL_KEYS = USER_KEYS | RUNTIME_KEYS
+
+    ENVIRONMENT: dict[str, tuple[str, str]] = {
+        "playlist_id": ("PLAYLIST_ID", "optional_string"),
+        "playlist_name": ("PLAYLIST_NAME", "string"),
+        "playlist_visibility": ("PLAYLIST_VISIBILITY", "string"),
+        "min_duration_seconds": ("VIDEO_MIN_DURATION_SECONDS", "integer"),
+        "max_duration_seconds": ("VIDEO_MAX_DURATION_SECONDS", "optional_integer"),
+        "lookback_hours": ("LOOKBACK_HOURS", "integer"),
+        "date_filter_mode": ("DATE_FILTER_MODE", "string"),
+        "date_filter_days": ("DATE_FILTER_DAYS", "optional_integer"),
+        "date_filter_start": ("DATE_FILTER_START", "optional_string"),
+        "date_filter_end": ("DATE_FILTER_END", "optional_string"),
+        "max_videos": ("MAX_VIDEOS_TO_FETCH", "integer"),
+        "skip_live_content": ("SKIP_LIVE_CONTENT", "boolean"),
+        "channel_filter_mode": ("CHANNEL_FILTER_MODE", "string"),
+        "channel_allowlist": ("CHANNEL_ALLOWLIST", "array"),
+        "channel_blocklist": ("CHANNEL_BLOCKLIST", "array"),
+        "channel_whitelist": ("CHANNEL_ID_WHITELIST", "array"),
+        "keyword_filter_mode": ("KEYWORD_FILTER_MODE", "string"),
+        "keyword_include": ("KEYWORD_INCLUDE", "array"),
+        "keyword_exclude": ("KEYWORD_EXCLUDE", "array"),
+        "keyword_match_type": ("KEYWORD_MATCH_TYPE", "string"),
+        "keyword_case_sensitive": ("KEYWORD_CASE_SENSITIVE", "boolean"),
+        "keyword_search_description": ("KEYWORD_SEARCH_DESCRIPTION", "boolean"),
+        "ollama_base_url": ("OLLAMA_BASE_URL", "string"),
+        "ollama_model": ("OLLAMA_MODEL", "string"),
+        "ollama_timeout_seconds": ("OLLAMA_TIMEOUT_SECONDS", "integer"),
+        "ollama_concurrency": ("OLLAMA_CONCURRENCY", "integer"),
+        "sleep_minimum_score": ("SLEEP_MINIMUM_SCORE", "number"),
+        "sleep_queue_size": ("SLEEP_QUEUE_SIZE", "integer"),
+        "refresh_timeout_seconds": ("REFRESH_TIMEOUT_SECONDS", "optional_integer"),
     }
-    
-    # Valid values for specific configuration keys
-    VALID_VALUES = {
-        "playlist_visibility": {"private", "unlisted", "public"},
-        "channel_filter_mode": {"none", "allowlist", "blocklist"},
-        "date_filter_mode": {"lookback", "days", "date_range"},
-        "keyword_filter_mode": {"none", "include", "exclude", "both"},
-        "keyword_match_type": {"any", "all"},
-    }
-    
+
     @classmethod
-    def validate_config(cls, config: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Validate and normalize configuration dictionary.
-        
-        Args:
-            config: Configuration dictionary to validate
-            
-        Returns:
-            Validated and normalized configuration dictionary
-            
-        Raises:
-            ValueError: If configuration is invalid
-        """
-        # Apply defaults for missing values
-        validated_config = cls.DEFAULTS.copy()
-        validated_config.update(config)
+    def parse_environment(cls, environment: Mapping[str, str]) -> dict[str, Any]:
+        parsed: dict[str, Any] = {}
+        for field, (name, value_type) in cls.ENVIRONMENT.items():
+            if name not in environment:
+                continue
+            raw = environment[name]
+            try:
+                parsed[field] = cls._parse_environment_value(raw, value_type)
+            except ValueError as exc:
+                raise ValueError(f"Invalid environment variable {name}: {exc}") from exc
+        return parsed
 
-        # Migrate legacy whitelist to allowlist if needed
-        validated_config = cls._migrate_legacy_whitelist(validated_config)
+    @staticmethod
+    def _parse_environment_value(raw: str, value_type: str) -> Any:
+        stripped = raw.strip()
+        if value_type.startswith("optional_") and not stripped:
+            return None
+        if value_type in {"string", "optional_string"}:
+            return stripped
+        if value_type in {"integer", "optional_integer"}:
+            if not re.fullmatch(r"[+-]?\d+", stripped):
+                raise ValueError("must be an integer")
+            return int(stripped)
+        if value_type == "number":
+            try:
+                return float(stripped)
+            except ValueError as exc:
+                raise ValueError("must be a number") from exc
+        if value_type == "boolean":
+            normalized = stripped.lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+            raise ValueError("must be true/false, yes/no, on/off, or 1/0")
+        if value_type == "array":
+            return [item.strip() for item in raw.split(",") if item.strip()] or None
+        raise AssertionError(f"Unsupported configuration parser: {value_type}")
 
-        # Validate specific fields
-        cls._validate_playlist_visibility(validated_config.get("playlist_visibility"))
-        cls._validate_channel_filter_mode(validated_config.get("channel_filter_mode"))
-        cls._validate_channel_lists(validated_config)
-        cls._validate_numeric_fields(validated_config)
-        cls._validate_date_filter_mode(validated_config.get("date_filter_mode"))
-        cls._validate_date_filters(validated_config)
-        cls._validate_keyword_filter_mode(validated_config.get("keyword_filter_mode"))
-        cls._validate_keyword_match_type(validated_config.get("keyword_match_type"))
-        cls._validate_keyword_filters(validated_config)
-        cls._validate_ollama_config(validated_config)
-
-        return validated_config
-    
     @classmethod
-    def _migrate_legacy_whitelist(cls, config: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Migrate legacy channel_whitelist to new allowlist/blocklist system.
+    def validate_config(
+        cls,
+        config: Mapping[str, Any],
+        *,
+        allow_runtime_keys: bool = True,
+    ) -> dict[str, Any]:
+        if not isinstance(config, Mapping):
+            raise ValueError("Configuration must be a JSON object")
+        allowed = cls.ALL_KEYS if allow_runtime_keys else cls.USER_KEYS
+        unknown = sorted(set(config) - allowed)
+        if unknown:
+            raise ValueError(f"Unknown configuration field(s): {', '.join(unknown)}")
 
-        If channel_whitelist exists and new fields are not set, migrate to allowlist mode.
-        """
-        # If new system is already configured, skip migration
-        if config.get("channel_filter_mode") != "none" or config.get("channel_allowlist") or config.get("channel_blocklist"):
-            return config
+        result = dict(cls.DEFAULTS)
+        result.update(config)
+        if allow_runtime_keys:
+            result.setdefault("playlist_id", None)
+        result = cls._migrate_legacy(result)
 
-        # Check for legacy whitelist
-        legacy_whitelist = config.get("channel_whitelist")
-        if legacy_whitelist:
-            # Migrate to allowlist mode
+        cls._string(result, "playlist_name", 1, 150)
+        cls._choice(result, "playlist_visibility", {"private", "unlisted", "public"})
+        cls._choice(result, "date_filter_mode", {"lookback", "days", "date_range"})
+        cls._choice(result, "channel_filter_mode", {"none", "allowlist", "blocklist"})
+        cls._choice(result, "keyword_filter_mode", {"none", "include", "exclude", "both"})
+        cls._choice(result, "keyword_match_type", {"any", "all"})
+        cls._integer(result, "min_duration_seconds", 0, 86_400)
+        cls._optional_integer(result, "max_duration_seconds", 1, 86_400)
+        cls._integer(result, "lookback_hours", 1, 168)
+        cls._optional_integer(result, "date_filter_days", 1, 365)
+        cls._integer(result, "max_videos", 1, 200)
+        cls._integer(result, "ollama_timeout_seconds", 1, 300)
+        cls._integer(result, "ollama_concurrency", 1, 3)
+        cls._integer(result, "sleep_queue_size", 1, 200)
+        cls._optional_integer(result, "refresh_timeout_seconds", 30, 14_400)
+        cls._number(result, "sleep_minimum_score", 0, 100)
+        for field in (
+            "skip_live_content",
+            "keyword_case_sensitive",
+            "keyword_search_description",
+        ):
+            if not isinstance(result[field], bool):
+                raise ValueError(f"{field} must be a boolean")
+
+        if result["max_duration_seconds"] is not None and (
+            result["max_duration_seconds"] < result["min_duration_seconds"]
+        ):
+            raise ValueError("max_duration_seconds cannot be less than min_duration_seconds")
+
+        cls._validate_dates(result)
+        result["channel_allowlist"] = cls._string_array(
+            result.get("channel_allowlist"), "channel_allowlist", 200, 24, CHANNEL_ID_PATTERN
+        )
+        result["channel_blocklist"] = cls._string_array(
+            result.get("channel_blocklist"), "channel_blocklist", 200, 24, CHANNEL_ID_PATTERN
+        )
+        overlap = set(result["channel_allowlist"] or ()) & set(result["channel_blocklist"] or ())
+        if overlap:
+            raise ValueError("A channel cannot appear in both allowlist and blocklist")
+        if result["channel_filter_mode"] == "allowlist" and not result["channel_allowlist"]:
+            raise ValueError("channel_allowlist is required in allowlist mode")
+        if result["channel_filter_mode"] == "blocklist" and not result["channel_blocklist"]:
+            raise ValueError("channel_blocklist is required in blocklist mode")
+
+        result["keyword_include"] = cls._string_array(
+            result.get("keyword_include"), "keyword_include", 50, 100
+        )
+        result["keyword_exclude"] = cls._string_array(
+            result.get("keyword_exclude"), "keyword_exclude", 50, 100
+        )
+        mode = result["keyword_filter_mode"]
+        if mode in {"include", "both"} and not result["keyword_include"]:
+            raise ValueError("keyword_include is required in include/both mode")
+        if mode in {"exclude", "both"} and not result["keyword_exclude"]:
+            raise ValueError("keyword_exclude is required in exclude/both mode")
+
+        cls._url(result, "ollama_base_url")
+        cls._string(result, "ollama_model", 1, 200)
+        playlist_id = result.get("playlist_id")
+        if playlist_id is not None:
+            if not isinstance(playlist_id, str) or not 1 <= len(playlist_id.strip()) <= 200:
+                raise ValueError("playlist_id must be a non-empty string of at most 200 characters")
+            result["playlist_id"] = playlist_id.strip()
+        if not allow_runtime_keys:
+            result.pop("playlist_id", None)
+        result.pop("channel_whitelist", None)
+        return result
+
+    @staticmethod
+    def _migrate_legacy(config: dict[str, Any]) -> dict[str, Any]:
+        legacy = config.get("channel_whitelist")
+        if (
+            legacy
+            and config.get("channel_filter_mode") == "none"
+            and not config.get("channel_allowlist")
+        ):
             config["channel_filter_mode"] = "allowlist"
-            config["channel_allowlist"] = list(legacy_whitelist) if isinstance(legacy_whitelist, set) else legacy_whitelist
-            # Keep legacy field for backward compatibility
-
+            config["channel_allowlist"] = legacy
         return config
 
-    @classmethod
-    def _validate_playlist_visibility(cls, visibility: str) -> None:
-        """Validate playlist visibility setting."""
-        valid_values = cls.VALID_VALUES["playlist_visibility"]
-        if visibility not in valid_values:
-            raise ValueError(
-                f"Invalid playlist_visibility: {visibility}. "
-                f"Must be one of: {', '.join(valid_values)}"
-            )
+    @staticmethod
+    def _string(config: dict[str, Any], field: str, minimum: int, maximum: int) -> None:
+        value = config[field]
+        if not isinstance(value, str) or not minimum <= len(value.strip()) <= maximum:
+            raise ValueError(f"{field} must be a string between {minimum} and {maximum} characters")
+        config[field] = value.strip()
+
+    @staticmethod
+    def _choice(config: dict[str, Any], field: str, choices: set[str]) -> None:
+        if config[field] not in choices:
+            raise ValueError(f"{field} must be one of: {', '.join(sorted(choices))}")
+
+    @staticmethod
+    def _integer(config: dict[str, Any], field: str, minimum: int, maximum: int) -> None:
+        value = config[field]
+        if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+            raise ValueError(f"{field} must be an integer between {minimum} and {maximum}")
 
     @classmethod
-    def _validate_channel_filter_mode(cls, mode: str) -> None:
-        """Validate channel filter mode setting."""
-        valid_values = cls.VALID_VALUES["channel_filter_mode"]
-        if mode not in valid_values:
-            raise ValueError(
-                f"Invalid channel_filter_mode: {mode}. "
-                f"Must be one of: {', '.join(valid_values)}"
-            )
+    def _optional_integer(
+        cls, config: dict[str, Any], field: str, minimum: int, maximum: int
+    ) -> None:
+        if config[field] is not None:
+            cls._integer(config, field, minimum, maximum)
 
-    @classmethod
-    def _validate_channel_lists(cls, config: Dict[str, Any]) -> None:
-        """Validate channel allowlist and blocklist."""
-        mode = config.get("channel_filter_mode", "none")
-        allowlist = config.get("channel_allowlist")
-        blocklist = config.get("channel_blocklist")
-
-        # Validate list types
-        if allowlist is not None and not isinstance(allowlist, (list, set)):
-            raise ValueError("channel_allowlist must be a list or set of channel IDs")
-
-        if blocklist is not None and not isinstance(blocklist, (list, set)):
-            raise ValueError("channel_blocklist must be a list or set of channel IDs")
-
-        # Check for conflicting configuration
-        if allowlist and blocklist:
-            # Find channels in both lists
-            allowlist_set = set(allowlist) if allowlist else set()
-            blocklist_set = set(blocklist) if blocklist else set()
-            conflicts = allowlist_set & blocklist_set
-
-            if conflicts:
-                raise ValueError(
-                    f"Channels cannot be in both allowlist and blocklist: {conflicts}"
-                )
-
-        # Warn if lists are set but mode doesn't match
-        if mode == "allowlist" and blocklist:
-            raise ValueError("Cannot use blocklist when filter mode is 'allowlist'")
-
-        if mode == "blocklist" and allowlist:
-            raise ValueError("Cannot use allowlist when filter mode is 'blocklist'")
-    
-    @classmethod
-    def _validate_numeric_fields(cls, config: Dict[str, Any]) -> None:
-        """Validate numeric configuration fields."""
-        numeric_fields = {
-            "min_duration_seconds": (0, 86400),  # 0 seconds to 24 hours
-            "max_duration_seconds": (1, 86400),  # 1 second to 24 hours (None allowed)
-            "lookback_hours": (1, 168),          # 1 hour to 7 days
-            "max_videos": (1, 200),              # 1 to 200 videos
-            "ollama_timeout_seconds": (1, 300),  # 1 second to 5 minutes
-            "sleep_queue_size": (1, 200),        # 1 to 200 videos
-        }
-
-        for field, (min_val, max_val) in numeric_fields.items():
-            value = config.get(field)
-            if value is not None:
-                if (
-                    not isinstance(value, int)
-                    or isinstance(value, bool)
-                    or value < min_val
-                    or value > max_val
-                ):
-                    raise ValueError(
-                        f"Invalid {field}: {value}. "
-                        f"Must be an integer between {min_val} and {max_val}"
-                    )
-
-        # Validate duration range logic
-        min_duration = config.get("min_duration_seconds")
-        max_duration = config.get("max_duration_seconds")
-        if min_duration is not None and max_duration is not None:
-            if max_duration < min_duration:
-                raise ValueError(
-                    f"max_duration_seconds ({max_duration}) cannot be less than "
-                    f"min_duration_seconds ({min_duration})"
-                )
-
-        sleep_score = config.get("sleep_minimum_score")
+    @staticmethod
+    def _number(config: dict[str, Any], field: str, minimum: float, maximum: float) -> None:
+        value = config[field]
         if (
-            not isinstance(sleep_score, (int, float))
-            or isinstance(sleep_score, bool)
-            or not 0 <= sleep_score <= 100
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not minimum <= value <= maximum
+        ):
+            raise ValueError(f"{field} must be a number between {minimum} and {maximum}")
+
+    @staticmethod
+    def _string_array(
+        value: Any,
+        field: str,
+        maximum_items: int,
+        maximum_length: int,
+        pattern: re.Pattern[str] | None = None,
+    ) -> list[str] | None:
+        if value is None:
+            return None
+        if isinstance(value, (str, bytes)) or not isinstance(value, (list, tuple, set)):
+            raise ValueError(f"{field} must be an array of strings")
+        if len(value) > maximum_items:
+            raise ValueError(f"{field} cannot contain more than {maximum_items} entries")
+        normalized: list[str] = []
+        for item in value:
+            if not isinstance(item, str) or not item.strip() or len(item.strip()) > maximum_length:
+                raise ValueError(
+                    f"Every {field} entry must be a non-empty string up to {maximum_length} characters"
+                )
+            item = item.strip()
+            if pattern is not None and not pattern.fullmatch(item):
+                raise ValueError(f"Invalid YouTube channel ID in {field}: {item}")
+            if item not in normalized:
+                normalized.append(item)
+        return normalized or None
+
+    @staticmethod
+    def _validate_dates(config: dict[str, Any]) -> None:
+        parsed: dict[str, date | None] = {}
+        for field in ("date_filter_start", "date_filter_end"):
+            value = config[field]
+            if value is None:
+                parsed[field] = None
+                continue
+            if not isinstance(value, str):
+                raise ValueError(f"{field} must be YYYY-MM-DD or null")
+            try:
+                parsed[field] = date.fromisoformat(value)
+            except ValueError as exc:
+                raise ValueError(f"{field} must be a valid YYYY-MM-DD date") from exc
+        if (
+            parsed["date_filter_start"]
+            and parsed["date_filter_end"]
+            and parsed["date_filter_end"] < parsed["date_filter_start"]
+        ):
+            raise ValueError("date_filter_end cannot be before date_filter_start")
+        mode = config["date_filter_mode"]
+        if mode == "days" and config["date_filter_days"] is None:
+            raise ValueError("date_filter_days is required in days mode")
+        if mode == "date_range" and (
+            parsed["date_filter_start"] is None or parsed["date_filter_end"] is None
         ):
             raise ValueError(
-                f"Invalid sleep_minimum_score: {sleep_score}. "
-                "Must be a number between 0 and 100"
+                "date_filter_start and date_filter_end are required in date_range mode"
             )
 
-    @classmethod
-    def _validate_ollama_config(cls, config: Dict[str, Any]) -> None:
-        """Validate the configured Ollama endpoint and model name."""
-        base_url = config.get("ollama_base_url")
-        if not isinstance(base_url, str) or not base_url.strip():
-            raise ValueError("ollama_base_url must be a non-empty HTTP(S) URL")
-
-        parsed = urlparse(base_url)
+    @staticmethod
+    def _url(config: dict[str, Any], field: str) -> None:
+        value = config[field]
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{field} must be a non-empty URL")
+        parsed = urlparse(value)
         if (
             parsed.scheme not in {"http", "https"}
             or not parsed.hostname
-            or parsed.username is not None
-            or parsed.password is not None
+            or parsed.username
+            or parsed.password
             or parsed.query
             or parsed.fragment
         ):
             raise ValueError(
-                "ollama_base_url must be an HTTP(S) URL without credentials, "
-                "a query string, or a fragment"
+                f"{field} must be an HTTP(S) URL without credentials, query, or fragment"
             )
-
-        model = config.get("ollama_model")
-        if not isinstance(model, str) or not model.strip():
-            raise ValueError("ollama_model must be a non-empty string")
+        config[field] = value.rstrip("/")
 
     @classmethod
-    def _validate_date_filter_mode(cls, mode: str) -> None:
-        """Validate date filter mode setting."""
-        valid_values = cls.VALID_VALUES["date_filter_mode"]
-        if mode not in valid_values:
-            raise ValueError(
-                f"Invalid date_filter_mode: {mode}. "
-                f"Must be one of: {', '.join(valid_values)}"
-            )
-
-    @classmethod
-    def _validate_date_filters(cls, config: Dict[str, Any]) -> None:
-        """Validate date filter configuration fields."""
-        mode = config.get("date_filter_mode", "lookback")
-
-        # Validate date_filter_days (if set)
-        days = config.get("date_filter_days")
-        if days is not None:
-            if not isinstance(days, int) or days < 1 or days > 365:
-                raise ValueError(
-                    f"Invalid date_filter_days: {days}. "
-                    f"Must be an integer between 1 and 365"
-                )
-
-        # Validate date_filter_start and date_filter_end (if set)
-        start_date_str = config.get("date_filter_start")
-        end_date_str = config.get("date_filter_end")
-
-        if start_date_str is not None:
-            try:
-                start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
-            except ValueError:
-                raise ValueError(
-                    f"Invalid date_filter_start: {start_date_str}. "
-                    f"Must be in YYYY-MM-DD format"
-                )
-
-        if end_date_str is not None:
-            try:
-                end_date = datetime.strptime(end_date_str, "%Y-%m-%d")
-            except ValueError:
-                raise ValueError(
-                    f"Invalid date_filter_end: {end_date_str}. "
-                    f"Must be in YYYY-MM-DD format"
-                )
-
-        # Validate date range logic (start <= end)
-        if start_date_str is not None and end_date_str is not None:
-            start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
-            end_date = datetime.strptime(end_date_str, "%Y-%m-%d")
-            if end_date < start_date:
-                raise ValueError(
-                    f"date_filter_end ({end_date_str}) cannot be before "
-                    f"date_filter_start ({start_date_str})"
-                )
-
-        # Validate mode-specific requirements
-        if mode == "days" and days is None:
-            raise ValueError(
-                "date_filter_days is required when date_filter_mode is 'days'"
-            )
-
-        if mode == "date_range":
-            if start_date_str is None or end_date_str is None:
-                raise ValueError(
-                    "Both date_filter_start and date_filter_end are required "
-                    "when date_filter_mode is 'date_range'"
-                )
-
-    @classmethod
-    def _validate_keyword_filter_mode(cls, mode: str) -> None:
-        """Validate keyword filter mode setting."""
-        valid_values = cls.VALID_VALUES["keyword_filter_mode"]
-        if mode not in valid_values:
-            raise ValueError(
-                f"Invalid keyword_filter_mode: {mode}. "
-                f"Must be one of: {', '.join(valid_values)}"
-            )
-
-    @classmethod
-    def _validate_keyword_match_type(cls, match_type: str) -> None:
-        """Validate keyword match type setting."""
-        valid_values = cls.VALID_VALUES["keyword_match_type"]
-        if match_type not in valid_values:
-            raise ValueError(
-                f"Invalid keyword_match_type: {match_type}. "
-                f"Must be one of: {', '.join(valid_values)}"
-            )
-
-    @classmethod
-    def _validate_keyword_filters(cls, config: Dict[str, Any]) -> None:
-        """Validate keyword filter configuration fields."""
-        mode = config.get("keyword_filter_mode", "none")
-        include_list = config.get("keyword_include")
-        exclude_list = config.get("keyword_exclude")
-
-        # Validate list types
-        if include_list is not None:
-            if not isinstance(include_list, list):
-                raise ValueError("keyword_include must be a list of strings")
-            # Check all items are strings
-            if not all(isinstance(k, str) for k in include_list):
-                raise ValueError("keyword_include must contain only strings")
-
-        if exclude_list is not None:
-            if not isinstance(exclude_list, list):
-                raise ValueError("keyword_exclude must be a list of strings")
-            # Check all items are strings
-            if not all(isinstance(k, str) for k in exclude_list):
-                raise ValueError("keyword_exclude must contain only strings")
-
-        # Validate boolean fields
-        case_sensitive = config.get("keyword_case_sensitive", False)
-        search_description = config.get("keyword_search_description", False)
-
-        if not isinstance(case_sensitive, bool):
-            raise ValueError("keyword_case_sensitive must be a boolean")
-
-        if not isinstance(search_description, bool):
-            raise ValueError("keyword_search_description must be a boolean")
-
-        # Validate mode-specific requirements
-        if mode == "include" and (not include_list or len(include_list) == 0):
-            raise ValueError(
-                "keyword_include list is required and must not be empty "
-                "when keyword_filter_mode is 'include'"
-            )
-
-        if mode == "exclude" and (not exclude_list or len(exclude_list) == 0):
-            raise ValueError(
-                "keyword_exclude list is required and must not be empty "
-                "when keyword_filter_mode is 'exclude'"
-            )
-
-        if mode == "both":
-            if not include_list or len(include_list) == 0:
-                raise ValueError(
-                    "keyword_include list is required and must not be empty "
-                    "when keyword_filter_mode is 'both'"
-                )
-            if not exclude_list or len(exclude_list) == 0:
-                raise ValueError(
-                    "keyword_exclude list is required and must not be empty "
-                    "when keyword_filter_mode is 'both'"
-                )
-
-    @classmethod
-    def get_config_summary(cls, config: Dict[str, Any]) -> str:
-        """
-        Generate a human-readable configuration summary.
-        
-        Args:
-            config: Configuration dictionary
-            
-        Returns:
-            Formatted configuration summary string
-        """
-        summary_lines = [
-            "Configuration Summary:",
-            f"  Playlist: {config.get('playlist_name', 'YouTube Sleep Queue')}",
-            f"  Visibility: {config.get('playlist_visibility', 'unlisted')}",
-        ]
-
-        # Duration summary
-        min_dur = config.get('min_duration_seconds', 60)
-        max_dur = config.get('max_duration_seconds')
-        if max_dur:
-            summary_lines.append(f"  Duration Range: {min_dur}s - {max_dur}s")
+    def discovery_start(cls, config: Mapping[str, Any], now: datetime | None = None) -> str:
+        """Return the earliest RFC3339 boundary implied by the selected mode."""
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        mode = config["date_filter_mode"]
+        if mode == "lookback":
+            boundary = current - timedelta(hours=config["lookback_hours"])
+        elif mode == "days":
+            target = current.date() - timedelta(days=config["date_filter_days"])
+            boundary = datetime.combine(target, time.min, tzinfo=timezone.utc)
         else:
-            summary_lines.append(f"  Min Duration: {min_dur}s")
+            boundary = datetime.combine(
+                date.fromisoformat(config["date_filter_start"]), time.min, tzinfo=timezone.utc
+            )
+        return boundary.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        # Date filtering summary
-        date_mode = config.get('date_filter_mode', 'lookback')
-        if date_mode == 'lookback':
-            summary_lines.append(f"  Lookback: {config.get('lookback_hours', 24)} hours")
-        elif date_mode == 'days':
-            days = config.get('date_filter_days', 7)
-            summary_lines.append(f"  Date Filter: Last {days} days")
-        elif date_mode == 'date_range':
-            start = config.get('date_filter_start', 'N/A')
-            end = config.get('date_filter_end', 'N/A')
-            summary_lines.append(f"  Date Filter: {start} to {end}")
-
-        summary_lines.extend([
-            f"  Max Videos: {config.get('max_videos', 50)}",
-            f"  Skip Live: {config.get('skip_live_content', True)}",
-        ])
-
-        # Channel filtering summary
-        filter_mode = config.get('channel_filter_mode', 'none')
-        if filter_mode == 'allowlist':
-            allowlist = config.get('channel_allowlist', [])
-            count = len(allowlist) if allowlist else 0
-            summary_lines.append(f"  Channel Filter: Allowlist ({count} channels)")
-        elif filter_mode == 'blocklist':
-            blocklist = config.get('channel_blocklist', [])
-            count = len(blocklist) if blocklist else 0
-            summary_lines.append(f"  Channel Filter: Blocklist ({count} channels)")
-        elif config.get('channel_whitelist'):
-            # Legacy whitelist
-            whitelist_count = len(config['channel_whitelist'])
-            summary_lines.append(f"  Channel Filter: Legacy Whitelist ({whitelist_count} channels)")
-        else:
-            summary_lines.append(f"  Channel Filter: None (all channels)")
-
-        # Keyword filtering summary
-        keyword_mode = config.get('keyword_filter_mode', 'none')
-        if keyword_mode != 'none':
-            include_list = config.get('keyword_include', [])
-            exclude_list = config.get('keyword_exclude', [])
-            match_type = config.get('keyword_match_type', 'any')
-
-            if keyword_mode == 'include':
-                summary_lines.append(f"  Keyword Filter: Include ({len(include_list)} keywords, {match_type})")
-            elif keyword_mode == 'exclude':
-                summary_lines.append(f"  Keyword Filter: Exclude ({len(exclude_list)} keywords)")
-            elif keyword_mode == 'both':
-                summary_lines.append(f"  Keyword Filter: Include ({len(include_list)}) + Exclude ({len(exclude_list)})")
-
-        return "\n".join(summary_lines)
+    @classmethod
+    def get_config_summary(cls, config: Mapping[str, Any]) -> str:
+        return (
+            f"Playlist={config['playlist_name']}; date_mode={config['date_filter_mode']}; "
+            f"max_videos={config['max_videos']}; model={config['ollama_model']}"
+        )

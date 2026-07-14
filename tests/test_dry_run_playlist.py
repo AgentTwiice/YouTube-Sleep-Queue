@@ -13,8 +13,9 @@ These tests pin the fixed behaviour:
 - dry-run + explicit playlist_id → read-only verification still happens
 - non-dry-run + no playlist_id → insert path still runs (unchanged)
 """
+
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from yt_sub_playlist.core.playlist_manager import PlaylistManager
 
@@ -27,6 +28,8 @@ class DryRunPlaylistTests(unittest.TestCase):
         manager.filter = MagicMock()
         manager.data_dir = "yt_sub_playlist/data"
         manager.config = {}
+        manager.runtime_state = MagicMock()
+        manager.runtime_state.playlist_id.return_value = None
         return manager
 
     def test_dry_run_without_playlist_id_never_calls_client(self):
@@ -76,6 +79,7 @@ class DryRunPlaylistTests(unittest.TestCase):
         self.assertIsNone(kwargs["playlist_id"])
         self.assertEqual(kwargs["playlist_name"], "YouTube Sleep Queue")
         self.assertEqual(result, "PLnew")
+        manager.runtime_state.save_playlist_id.assert_called_once_with("PLnew")
 
     def test_dry_run_sentinel_is_reserved(self):
         # If anyone ever changes the sentinel to a plausible-looking real ID,

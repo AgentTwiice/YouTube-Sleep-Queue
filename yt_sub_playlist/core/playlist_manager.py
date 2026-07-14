@@ -1,87 +1,55 @@
-"""
-High-level playlist management and orchestration.
+"""High-level orchestration for sleep queue discovery, ranking, and insertion."""
 
-This module provides the main business logic for managing YouTube playlists:
-- Video fetching from subscriptions
-- Intelligent filtering and deduplication
-- Playlist synchronization and updates
-- Reporting and analytics
-"""
+from __future__ import annotations
 
 import csv
-import json
+import io
 import logging
-import os
-from typing import Any, Dict, List
+from typing import Any
 
-from .youtube_client import YouTubeClient
-from .video_filtering import VideoFilter
-from .sleep_ranker import (
-    PROMPT_VERSION,
-    OllamaClient,
-    SleepRanker,
-    video_metadata_hash,
-)
-from .sleep_store import SleepQueueStore
 from ..config.env_loader import VideoCache
+from .atomic_io import atomic_write_json, atomic_write_text
+from .paths import DEFAULT_DATA_DIR, AppPaths
+from .runtime_state import RuntimeState
+from .sleep_ranker import OllamaClient, SleepRanker, video_metadata_hash
+from .sleep_store import SleepQueueStore
+from .video_filtering import VideoFilter
+from .youtube_client import DiscoveryResult, PlaylistAddOutcome, YouTubeClient
 
 logger = logging.getLogger(__name__)
 
 
-# Local-dev default; the container entrypoint sets YT_SUB_PLAYLIST_DATA_DIR=/data
-# so state files land at the root of the mounted volume instead of a
-# nested yt_sub_playlist/data/ subdirectory. Kept as a module-level constant
-# so tests and downstream callers can reference it explicitly.
-DEFAULT_DATA_DIR = "yt_sub_playlist/data"
-
-
-def resolve_data_dir(explicit: str = None) -> str:
-    """
-    Resolve the data directory using the precedence:
-    explicit arg > YT_SUB_PLAYLIST_DATA_DIR env var > DEFAULT_DATA_DIR.
-
-    The env-var override exists so the container's entrypoint can point
-    the app at /data (see docker/entrypoint.sh and issue #26). Local
-    development that runs `python -m yt_sub_playlist` from the repo root
-    keeps the historical behaviour when the env var is not set.
-    """
+def resolve_data_dir(explicit: str | None = None) -> str:
+    """Backward-compatible string wrapper around the shared path resolver."""
     if explicit:
         return explicit
+    import os
+
     return os.getenv("YT_SUB_PLAYLIST_DATA_DIR") or DEFAULT_DATA_DIR
 
 
 class PlaylistManager:
-    """
-    High-level manager for YouTube playlist automation.
+    DRY_RUN_PLAYLIST_ID = "(dry-run)"
 
-    Orchestrates the complete workflow:
-    1. Fetch videos from subscriptions
-    2. Apply filtering rules
-    3. Sync videos to target playlist
-    4. Generate reports and analytics
-    """
-
-    def __init__(self, config: Dict[str, Any], data_dir: str = None):
-        """
-        Initialize playlist manager.
-
-        Args:
-            config: Application configuration dictionary
-            data_dir: Directory for data storage and caching. When None
-                (the default), resolves via YT_SUB_PLAYLIST_DATA_DIR env
-                var or falls back to ``DEFAULT_DATA_DIR`` — see
-                ``resolve_data_dir``.
-        """
-        resolved_data_dir = resolve_data_dir(data_dir)
+    def __init__(
+        self,
+        config: dict[str, Any],
+        data_dir: str | None = None,
+        *,
+        client: YouTubeClient | None = None,
+        cache: VideoCache | None = None,
+        store: SleepQueueStore | None = None,
+        ranker: SleepRanker | None = None,
+    ):
         self.config = config
-        self.data_dir = resolved_data_dir
-        self.client = YouTubeClient(resolved_data_dir)
-        self.cache = VideoCache(data_dir=resolved_data_dir)
+        self.paths = AppPaths.resolve(data_dir)
+        self.data_dir = str(self.paths.data_dir)
+        self.client = client or YouTubeClient(self.paths.data_dir)
+        self.cache = cache or VideoCache(cache_file=self.paths.cache)
         self.filter = VideoFilter(config, self.cache)
-        self.store = SleepQueueStore(
-            os.path.join(resolved_data_dir, "sleep_queue.sqlite3")
-        )
-        self.ranker = SleepRanker(
+        self.store = store or SleepQueueStore(str(self.paths.database))
+        self.runtime_state = RuntimeState(self.paths.runtime_state)
+        self.ranker = ranker or SleepRanker(
             OllamaClient(
                 config["ollama_base_url"],
                 config["ollama_model"],
@@ -89,102 +57,134 @@ class PlaylistManager:
             ),
             config["sleep_minimum_score"],
             config["sleep_queue_size"],
+            config.get("ollama_concurrency", 1),
         )
 
     def sync_subscription_videos_to_playlist(
         self,
-        playlist_id: str,
+        playlist_id: str | None,
         published_after: str,
-        channel_whitelist: set = None,
-        dry_run: bool = False
-    ) -> List[Dict[str, Any]]:
-        """
-        Main orchestration method for syncing subscription videos to playlist.
-
-        Args:
-            playlist_id: Target playlist ID
-            published_after: RFC 3339 timestamp for filtering recent videos
-            channel_whitelist: Set of allowed channel IDs (None = allow all)
-            dry_run: If True, don't actually add videos
-
-        Returns:
-            List of video metadata dicts with 'added' field indicating success
-        """
+        channel_whitelist: set[str] | None = None,
+        dry_run: bool = False,
+        playlist_name: str | None = None,
+        privacy_status: str | None = None,
+    ) -> list[dict[str, Any]]:
         run_id = self.store.start_run(dry_run)
         try:
-            # Step 1: Fetch recent subscription videos
-            logger.info(f"Fetching videos published after {published_after}")
-            videos = self.client.get_recent_uploads_from_subscriptions(
+            discovered = self.client.get_recent_uploads_from_subscriptions(
                 published_after=published_after,
-                max_per_channel=5
+                max_per_channel=5,
+                max_total=self.config["max_videos"],
             )
-
-            if not videos:
-                logger.info("No recent subscription videos found")
-                self.store.complete_run(run_id, 0, 0)
+            # Compatibility for injected legacy test doubles; production always returns DiscoveryResult.
+            discovery = (
+                discovered
+                if isinstance(discovered, DiscoveryResult)
+                else DiscoveryResult(list(discovered))
+            )
+            completion = "completed_with_errors" if discovery.partial else "completed"
+            warning = "; ".join(issue.message for issue in discovery.errors)[:2000] or None
+            warning_count = len(discovery.errors)
+            if not discovery.videos:
+                self.store.complete_run(
+                    run_id,
+                    0,
+                    0,
+                    warning_count=warning_count,
+                    status=completion,
+                    warning_message=warning,
+                )
                 return []
 
-            # Step 2: Filter videos based on criteria
-            filtered_videos = self.filter.filter_videos(videos, channel_whitelist)
-
-            if not filtered_videos:
-                logger.info("No videos passed filters")
-                self.store.complete_run(run_id, 0, 0)
-                return []
-
-            # Bound local model calls using the existing max-videos setting while
-            # preferring the most recently published candidates.
-            filtered_videos = sorted(
-                filtered_videos,
+            filtered = self.filter.filter_videos(discovery.videos, channel_whitelist)
+            filtered = sorted(
+                filtered,
                 key=lambda video: video.get("published_at") or "",
                 reverse=True,
             )[: self.config["max_videos"]]
-
-            # Step 3: Persist and rank candidates using local Ollama. Reuse scores
-            # only when the model, prompt, and exact prompt metadata still match.
-            self.store.save_candidates(run_id, filtered_videos)
-            self.store.set_run_status(run_id, "ranking")
-            metadata_hashes = {
-                video["video_id"]: video_metadata_hash(video)
-                for video in filtered_videos
-            }
-            model = self.ranker.client.model
-            cached_scores = self.store.get_cached_scores(
-                metadata_hashes, model, PROMPT_VERSION
-            )
-            all_ranked_videos = self.ranker.rank_all(filtered_videos, cached_scores)
-            ranked_videos = self.ranker.select(all_ranked_videos)
-            selected_ids = {video["video_id"] for video in ranked_videos}
-            self.store.save_rankings(
-                all_ranked_videos, model, PROMPT_VERSION, selected_ids
-            )
-
-            if not ranked_videos:
-                logger.info("No videos met the minimum sleep suitability score")
-                self.store.complete_run(run_id, len(filtered_videos), 0)
+            if not filtered:
+                self.store.complete_run(
+                    run_id,
+                    0,
+                    0,
+                    warning_count=warning_count,
+                    status=completion,
+                    warning_message=warning,
+                )
                 return []
 
-            # Step 4: Add the highest-ranked videos to the playlist, then finish
-            # the run with the actual insertion outcome.
+            self.store.save_candidates(run_id, filtered)
+            self.store.set_run_status(run_id, "ranking")
+            metadata_hashes = {video["video_id"]: video_metadata_hash(video) for video in filtered}
+            model = self.ranker.client.model
+            fingerprint = self.ranker.cache_fingerprint
+            cached = self.store.get_cached_scores(metadata_hashes, model, fingerprint)
+            ranked_all = self.ranker.rank_all(
+                filtered,
+                cached,
+                on_ranked=lambda ranked: self.store.save_ranking(ranked, model, fingerprint),
+            )
+            selected = self.ranker.select(ranked_all)
+            selected_ids = {video["video_id"] for video in selected}
+            self.store.save_rankings(ranked_all, model, fingerprint, selected_ids)
+            if not selected:
+                self.store.complete_run(
+                    run_id,
+                    len(filtered),
+                    0,
+                    warning_count=warning_count,
+                    status=completion,
+                    warning_message=warning,
+                )
+                return []
+
+            # Playlist creation is deliberately deferred until there is something to insert.
+            resolved_playlist_id = self.get_or_create_playlist(
+                playlist_id=playlist_id,
+                playlist_name=playlist_name
+                or self.config.get("playlist_name", "YouTube Sleep Queue"),
+                privacy_status=privacy_status or self.config.get("playlist_visibility", "unlisted"),
+                dry_run=dry_run,
+            )
             self.store.set_run_status(run_id, "adding")
             results = self.add_videos_to_playlist(
-                playlist_id=playlist_id,
-                videos=ranked_videos,
-                dry_run=dry_run
+                playlist_id=resolved_playlist_id, videos=selected, dry_run=dry_run
             )
-            successful_ids = [
-                video["video_id"] for video in results if video.get("added")
-            ]
-            added_count = 0 if dry_run else len(successful_ids)
-            failed_count = 0 if dry_run else len(ranked_videos) - added_count
-            if not dry_run:
-                self.store.mark_added(successful_ids)
+            if dry_run:
+                added_ids: list[str] = []
+                existing_ids: list[str] = []
+                failed_ids: list[str] = []
+            else:
+                added_ids = [
+                    v["video_id"]
+                    for v in results
+                    if v["playlist_status"] == PlaylistAddOutcome.ADDED
+                ]
+                existing_ids = [
+                    v["video_id"]
+                    for v in results
+                    if v["playlist_status"] == PlaylistAddOutcome.ALREADY_PRESENT
+                ]
+                failed_ids = [
+                    v["video_id"]
+                    for v in results
+                    if v["playlist_status"] == PlaylistAddOutcome.FAILED
+                ]
+                self.store.mark_outcomes(added_ids, existing_ids, failed_ids)
+            final_status = (
+                "completed_with_errors" if discovery.partial or failed_ids else "completed"
+            )
+            final_warning_count = warning_count + len(failed_ids)
             self.store.complete_run(
                 run_id,
-                len(filtered_videos),
-                len(ranked_videos),
-                added_count,
-                failed_count,
+                len(filtered),
+                len(selected),
+                len(added_ids),
+                len(failed_ids),
+                len(existing_ids),
+                final_warning_count,
+                final_status,
+                warning,
             )
             return results
         except Exception as exc:
@@ -197,210 +197,121 @@ class PlaylistManager:
     def add_videos_to_playlist(
         self,
         playlist_id: str,
-        videos: List[Dict[str, Any]],
+        videos: list[dict[str, Any]],
         dry_run: bool = False,
-    ) -> List[Dict[str, Any]]:
-        """
-        Add filtered videos to the playlist and update cache.
-
-        Args:
-            playlist_id: Target playlist ID
-            videos: List of videos to add
-            dry_run: If True, don't actually add videos
-
-        Returns:
-            List of video metadata dicts with 'added' field indicating success
-        """
-        if not videos:
-            logger.info("No videos to add to playlist")
-            return []
-
+    ) -> list[dict[str, Any]]:
         if dry_run:
-            logger.info(f"DRY RUN: Would add {len(videos)} videos to playlist {playlist_id}")
-            for video in videos:
-                logger.info(f"  - {video['title']} ({video['video_id']})")
-            # Return videos with added=True for dry run
-            return [dict(video, added=True) for video in videos]
-
-        # Add videos to playlist using the client
-        video_ids = [video["video_id"] for video in videos]
-        results = self.client.add_videos_to_playlist(playlist_id, video_ids)
-
-        # Create detailed results with metadata
-        detailed_results = []
+            return [dict(video, added=False, playlist_status="would_add") for video in videos]
+        outcomes = self.client.add_videos_to_playlist(
+            playlist_id, [video["video_id"] for video in videos]
+        )
+        processed: list[tuple[str, str, str]] = []
+        detailed: list[dict[str, Any]] = []
         for video in videos:
-            video_id = video["video_id"]
-            added = results.get(video_id, False)
-
-            # Update cache for successful additions
-            if added:
-                self.cache.mark_processed(
-                    video_id, title=video["title"], channel=video["channel_title"]
+            outcome = outcomes.get(video["video_id"], PlaylistAddOutcome.FAILED)
+            if outcome in {PlaylistAddOutcome.ADDED, PlaylistAddOutcome.ALREADY_PRESENT}:
+                processed.append(
+                    (video["video_id"], video["title"], video.get("channel_title", ""))
                 )
-                logger.info(f"✅ Added: {video['title']}")
-            else:
-                logger.warning(f"❌ Failed to add: {video['title']}")
-
-            # Add the 'added' field to the video metadata
-            video_result = dict(video, added=added)
-            detailed_results.append(video_result)
-
-        return detailed_results
-
-    DRY_RUN_PLAYLIST_ID = "(dry-run)"
+            detailed.append(
+                dict(
+                    video,
+                    added=outcome == PlaylistAddOutcome.ADDED,
+                    playlist_status=str(outcome),
+                )
+            )
+        self.cache.mark_processed_many(processed)
+        return detailed
 
     def get_or_create_playlist(
         self,
-        playlist_id: str = None,
-        playlist_name: str = None,
+        playlist_id: str | None = None,
+        playlist_name: str | None = None,
         privacy_status: str = "unlisted",
         dry_run: bool = False,
     ) -> str:
-        """
-        Get existing playlist or create new one.
-
-        In dry-run mode, no playlist is ever created. If ``playlist_id`` is
-        supplied it is still verified read-only against the API (safe under
-        dry-run semantics). If ``playlist_id`` is not supplied, the method
-        logs what would be created and returns a sentinel string so the sync
-        pipeline can proceed to its own dry-run logging.
-
-        Args:
-            playlist_id: Existing playlist ID (if provided)
-            playlist_name: Name for new playlist (if creating)
-            privacy_status: Privacy setting for new playlist
-            dry_run: If True, never create a playlist even when playlist_id is None
-
-        Returns:
-            Playlist ID (or ``DRY_RUN_PLAYLIST_ID`` sentinel in dry-run + no id)
-
-        Raises:
-            SystemExit: If playlist operations fail
-        """
-        resolved_name = playlist_name or "YouTube Sleep Queue"
-
+        """Resolve explicit ID first, then persisted generated ID, then create once."""
         if dry_run and not playlist_id:
-            logger.info(
-                f"DRY RUN: Would create playlist '{resolved_name}' "
-                f"(privacy={privacy_status}). Set PLAYLIST_ID to skip this step."
-            )
             return self.DRY_RUN_PLAYLIST_ID
+        state = getattr(
+            self,
+            "runtime_state",
+            RuntimeState(AppPaths.resolve(getattr(self, "data_dir", None)).runtime_state),
+        )
+        persisted = None if playlist_id else state.playlist_id()
+        resolved = self.client.get_or_create_playlist(
+            playlist_id=playlist_id or persisted,
+            playlist_name=playlist_name or "YouTube Sleep Queue",
+            privacy_status=privacy_status,
+        )
+        if not playlist_id and not persisted:
+            state.save_playlist_id(resolved)
+        return resolved
 
-        resolved_id = self.client.get_or_create_playlist(
-            playlist_id=playlist_id,
-            playlist_name=resolved_name,
-            privacy_status=privacy_status
+    def write_report(self, video_results: list[dict[str, Any]], report_path: str) -> None:
+        """Atomically write an explicitly requested CSV report and dashboard snapshot."""
+        fields = [
+            "title",
+            "video_id",
+            "channel_title",
+            "channel_id",
+            "published_at",
+            "duration_seconds",
+            "live_broadcast",
+            "sleep_score",
+            "sleep_rationale",
+            "playlist_status",
+            "added",
+        ]
+        output = io.StringIO(newline="")
+        writer = csv.DictWriter(output, fieldnames=fields)
+        writer.writeheader()
+        for video in video_results:
+            writer.writerow({field: _spreadsheet_safe(video.get(field, "")) for field in fields})
+        atomic_write_text(report_path, output.getvalue())
+        self._write_dashboard_json(video_results)
+
+    def _write_dashboard_json(self, video_results: list[dict[str, Any]]) -> None:
+        from datetime import datetime, timezone
+
+        atomic_write_json(
+            self.paths.dashboard_playlist,
+            {
+                "schema_version": 1,
+                "source": "generated",
+                "stale": False,
+                "last_updated": datetime.now(timezone.utc).isoformat(),
+                "videos": [
+                    {
+                        key: video.get(key, default)
+                        for key, default in {
+                            "title": "",
+                            "video_id": "",
+                            "channel_title": "",
+                            "channel_id": "",
+                            "published_at": "",
+                            "duration_seconds": 0,
+                            "live_broadcast": "none",
+                            "sleep_score": None,
+                            "sleep_rationale": "",
+                            "playlist_status": "unknown",
+                            "added": False,
+                        }.items()
+                    }
+                    for video in video_results
+                ],
+            },
+            mode=0o600,
         )
 
-        if not resolved_id:
-            logger.error("Failed to get or create target playlist")
-            raise SystemExit(1)
-
-        return resolved_id
-
-    def write_report(self, video_results: List[Dict[str, Any]], report_path: str) -> None:
-        """
-        Write video metadata to a CSV report file and automatically update dashboard JSON.
-
-        Args:
-            video_results: List of video metadata dicts with 'added' field
-            report_path: Path to write the CSV file
-        """
-        if not video_results:
-            logger.info("No videos to report")
-            return
-
-        try:
-            # Write CSV report
-            report_directory = os.path.dirname(report_path)
-            if report_directory:
-                os.makedirs(report_directory, exist_ok=True)
-            with open(report_path, 'w', newline='', encoding='utf-8') as csvfile:
-                fieldnames = [
-                    'title', 'video_id', 'channel_title', 'channel_id',
-                    'published_at', 'duration_seconds', 'live_broadcast',
-                    'sleep_score', 'sleep_rationale', 'added'
-                ]
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-
-                writer.writeheader()
-                for video in video_results:
-                    # Only write the fields we want in the CSV
-                    row = {
-                        field: _spreadsheet_safe(video.get(field, ''))
-                        for field in fieldnames
-                    }
-                    writer.writerow(row)
-
-            added_count = sum(1 for v in video_results if v.get('added', False))
-            logger.info(f"Report written to {report_path} ({added_count}/{len(video_results)} videos added)")
-
-            # Automatically update dashboard JSON
-            self._write_dashboard_json(video_results)
-
-        except Exception as e:
-            logger.warning(f"Failed to write report to {report_path}: {e}")
-
-    def _write_dashboard_json(self, video_results: List[Dict[str, Any]]) -> None:
-        """
-        Write video results to dashboard JSON file.
-
-        Args:
-            video_results: List of video metadata dicts
-        """
-        try:
-            # Determine dashboard JSON path relative to project root
-            # Assumes this module is at yt_sub_playlist/core/playlist_manager.py
-            project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            dashboard_json_path = os.path.join(project_root, 'dashboard', 'playlist.json')
-
-            # Convert video results to dashboard format
-            playlist_data = []
-            for video in video_results:
-                playlist_data.append({
-                    'title': video.get('title', ''),
-                    'video_id': video.get('video_id', ''),
-                    'channel_title': video.get('channel_title', ''),
-                    'channel_id': video.get('channel_id', ''),
-                    'published_at': video.get('published_at', ''),
-                    'duration_seconds': int(video.get('duration_seconds', 0)) if video.get('duration_seconds') else 0,
-                    'live_broadcast': video.get('live_broadcast', 'none'),
-                    'sleep_score': video.get('sleep_score'),
-                    'sleep_rationale': video.get('sleep_rationale', ''),
-                    'added': bool(video.get('added', False))
-                })
-
-            # Write JSON file
-            os.makedirs(os.path.dirname(dashboard_json_path), exist_ok=True)
-            with open(dashboard_json_path, 'w', encoding='utf-8') as jsonfile:
-                json.dump(playlist_data, jsonfile, indent=2, ensure_ascii=False)
-
-            logger.info(f"Dashboard JSON updated: {dashboard_json_path} ({len(playlist_data)} videos)")
-
-        except Exception as e:
-            logger.warning(f"Failed to write dashboard JSON: {e}")
-    
-    def get_cache_stats(self) -> Dict[str, int]:
-        """
-        Get video cache statistics.
-        
-        Returns:
-            Dictionary with cache statistics
-        """
+    def get_cache_stats(self) -> dict[str, int]:
         return self.cache.get_stats()
-    
-    def get_filtering_stats(self) -> Dict[str, int]:
-        """
-        Get video filtering statistics from the last filter operation.
-        
-        Returns:
-            Dictionary with filtering statistics
-        """
+
+    def get_filtering_stats(self) -> dict[str, int]:
         return self.filter.get_filtering_stats()
 
 
 def _spreadsheet_safe(value: Any) -> Any:
-    """Prevent untrusted text from becoming a spreadsheet formula."""
     if isinstance(value, str) and value.startswith(("=", "+", "-", "@", "\t", "\r")):
         return f"'{value}"
     return value

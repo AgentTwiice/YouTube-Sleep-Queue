@@ -5,11 +5,11 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List
+from typing import Any, Dict, Iterable, Iterator
 
-
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 ACTIVE_RUN_STATUSES = {"running", "ranking", "adding"}
+COMPLETED_RUN_STATUSES = {"completed", "completed_with_errors"}
 
 
 class SleepQueueStore:
@@ -19,6 +19,7 @@ class SleepQueueStore:
         self.database_path = Path(database_path)
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self.migrate()
+        self.reconcile_abandoned_runs()
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -111,6 +112,16 @@ class SleepQueueStore:
                         """,
                     ),
                 )
+                version = 2
+            if version < 3:
+                self._run_migration(
+                    connection,
+                    3,
+                    (
+                        "ALTER TABLE queue_runs ADD COLUMN existing_count INTEGER NOT NULL DEFAULT 0",
+                        "ALTER TABLE queue_runs ADD COLUMN warning_count INTEGER NOT NULL DEFAULT 0",
+                    ),
+                )
 
     @staticmethod
     def _run_migration(
@@ -132,15 +143,30 @@ class SleepQueueStore:
                 "INSERT INTO queue_runs(started_at, dry_run, status) VALUES (?, ?, 'running')",
                 (_utc_now(), int(dry_run)),
             )
+            if cursor.lastrowid is None:
+                raise RuntimeError("SQLite did not return a run ID")
             return int(cursor.lastrowid)
+
+    def reconcile_abandoned_runs(self) -> int:
+        """Mark active rows left by a prior process as abandoned failures."""
+        with self._connect() as connection:
+            placeholders = ",".join("?" for _ in ACTIVE_RUN_STATUSES)
+            cursor = connection.execute(
+                f"""
+                UPDATE queue_runs
+                SET completed_at=?, status='failed',
+                    error_message='Run was abandoned by a crash or terminated refresh'
+                WHERE completed_at IS NULL AND status IN ({placeholders})
+                """,
+                (_utc_now(), *sorted(ACTIVE_RUN_STATUSES)),
+            )
+            return int(cursor.rowcount)
 
     def set_run_status(self, run_id: int, status: str) -> None:
         if status not in ACTIVE_RUN_STATUSES:
             raise ValueError(f"Invalid active run status: {status}")
         with self._connect() as connection:
-            connection.execute(
-                "UPDATE queue_runs SET status=? WHERE id=?", (status, run_id)
-            )
+            connection.execute("UPDATE queue_runs SET status=? WHERE id=?", (status, run_id))
 
     def save_candidates(self, run_id: int, videos: Iterable[Dict[str, Any]]) -> None:
         now = _utc_now()
@@ -247,6 +273,18 @@ class SleepQueueStore:
                     ),
                 )
 
+    def save_ranking(
+        self,
+        ranked: Dict[str, Any],
+        model: str,
+        prompt_version: str,
+        selected: bool = False,
+    ) -> None:
+        """Persist one successful ranking immediately."""
+        self.save_rankings(
+            [ranked], model, prompt_version, {ranked["video_id"]} if selected else set()
+        )
+
     def mark_added(self, video_ids: Iterable[str]) -> None:
         now = _utc_now()
         with self._connect() as connection:
@@ -259,6 +297,31 @@ class SleepQueueStore:
                 ((now, video_id) for video_id in video_ids),
             )
 
+    def mark_outcomes(
+        self,
+        added_ids: Iterable[str],
+        existing_ids: Iterable[str],
+        failed_ids: Iterable[str],
+    ) -> None:
+        now = _utc_now()
+        with self._connect() as connection:
+            connection.executemany(
+                """
+                UPDATE video_candidates
+                SET status='added', ever_added_at=COALESCE(ever_added_at, ?)
+                WHERE video_id=?
+                """,
+                ((now, video_id) for video_id in added_ids),
+            )
+            connection.executemany(
+                "UPDATE video_candidates SET status='already_present' WHERE video_id=?",
+                ((video_id,) for video_id in existing_ids),
+            )
+            connection.executemany(
+                "UPDATE video_candidates SET status='add_failed' WHERE video_id=?",
+                ((video_id,) for video_id in failed_ids),
+            )
+
     def complete_run(
         self,
         run_id: int,
@@ -266,21 +329,32 @@ class SleepQueueStore:
         selected_count: int,
         added_count: int = 0,
         failed_count: int = 0,
+        existing_count: int = 0,
+        warning_count: int = 0,
+        status: str = "completed",
+        warning_message: str | None = None,
     ) -> None:
+        if status not in COMPLETED_RUN_STATUSES:
+            raise ValueError(f"Invalid completed run status: {status}")
         with self._connect() as connection:
             connection.execute(
                 """
                 UPDATE queue_runs
-                SET completed_at=?, status='completed', error_message=NULL,
-                    candidate_count=?, selected_count=?, added_count=?, failed_count=?
+                SET completed_at=?, status=?, error_message=?,
+                    candidate_count=?, selected_count=?, added_count=?, failed_count=?,
+                    existing_count=?, warning_count=?
                 WHERE id=?
                 """,
                 (
                     _utc_now(),
+                    status,
+                    warning_message[:2000] if warning_message else None,
                     candidate_count,
                     selected_count,
                     added_count,
                     failed_count,
+                    existing_count,
+                    warning_count,
                     run_id,
                 ),
             )

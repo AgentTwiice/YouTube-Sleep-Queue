@@ -10,7 +10,6 @@ This module manages the OAuth2 flow for YouTube API access, including:
 
 import logging
 import os
-from pathlib import Path
 
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
@@ -18,27 +17,42 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
+from ..core.atomic_io import atomic_write_text
+from ..core.paths import AppPaths
+
 logger = logging.getLogger(__name__)
 
 # YouTube Data API v3 scopes
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.readonly",
-    "https://www.googleapis.com/auth/youtube",
+    "https://www.googleapis.com/auth/youtube.force-ssl",
 ]
 
 # Authentication file paths
-TOKEN_FILE = "token.json"
+TOKEN_FILE = str(AppPaths.resolve().data_dir / "token.json")
 CREDENTIALS_FILE = "client_secrets.json"
+
+
+class YouTubeAuthenticationError(RuntimeError):
+    """Authentication is unavailable, invalid, or insufficient."""
 
 
 def _load_stored_credentials():
     """Load OAuth credentials from Google's authorized-user JSON format."""
-    if not os.path.exists(TOKEN_FILE):
+    token_path = TOKEN_FILE
+    legacy_path = "token.json"
+    if not os.path.exists(token_path) and token_path != legacy_path and os.path.exists(legacy_path):
+        token_path = legacy_path
+        logger.warning(
+            "Using legacy root token.json; it will migrate to %s on the next refresh",
+            TOKEN_FILE,
+        )
+    if not os.path.exists(token_path):
         return None
 
     try:
-        credentials = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
-        logger.debug("Loaded existing credentials from %s", TOKEN_FILE)
+        credentials = Credentials.from_authorized_user_file(token_path, SCOPES)
+        logger.debug("Loaded existing credentials from %s", token_path)
         return credentials
     except (OSError, ValueError, UnicodeDecodeError) as exc:
         logger.error("The stored token file is not valid authorized-user JSON: %s", exc)
@@ -47,33 +61,29 @@ def _load_stored_credentials():
             "'python -m yt_sub_playlist.auth.oauth' to authenticate again.",
             TOKEN_FILE,
         )
-        raise SystemExit(1) from exc
+        raise YouTubeAuthenticationError(
+            f"Stored OAuth token {TOKEN_FILE} is invalid; delete it and reauthorise"
+        ) from exc
 
 
 def _save_credentials(credentials) -> None:
     """Atomically persist OAuth credentials as private JSON."""
-    token_path = Path(TOKEN_FILE)
-    temporary_path = token_path.with_name(f".{token_path.name}.tmp")
     try:
-        temporary_path.write_text(credentials.to_json(), encoding="utf-8")
-        try:
-            temporary_path.chmod(0o600)
-        except OSError:
-            logger.debug("Could not tighten permissions on %s", temporary_path)
-        temporary_path.replace(token_path)
+        atomic_write_text(TOKEN_FILE, credentials.to_json(), mode=0o600)
         logger.debug("Credentials saved to %s", TOKEN_FILE)
     except OSError as exc:
-        temporary_path.unlink(missing_ok=True)
-        logger.warning("Failed to save credentials: %s", exc)
+        raise YouTubeAuthenticationError(
+            f"Failed to save OAuth credentials to {TOKEN_FILE}: {exc}"
+        ) from exc
 
 
 def get_authenticated_service():
     """
     Authenticate and return a YouTube API service object.
-    
+
     Handles the complete OAuth2 flow including:
     - Loading existing tokens
-    - Refreshing expired tokens  
+    - Refreshing expired tokens
     - Running new authentication flow if needed
     - Saving tokens for future use
 
@@ -81,7 +91,7 @@ def get_authenticated_service():
         googleapiclient.discovery.Resource: Authenticated YouTube API service
 
     Raises:
-        SystemExit: If authentication fails completely
+        YouTubeAuthenticationError: If authentication fails completely
     """
     creds = _load_stored_credentials()
 
@@ -100,21 +110,21 @@ def get_authenticated_service():
         if not creds:
             if not os.path.exists(CREDENTIALS_FILE):
                 logger.error(f"Credentials file {CREDENTIALS_FILE} not found")
-                logger.error(
-                    "Please download your OAuth2 credentials from Google Cloud Console"
-                )
+                logger.error("Please download your OAuth2 credentials from Google Cloud Console")
                 logger.error("and save them as 'client_secrets.json'")
-                raise SystemExit(1)
+                raise YouTubeAuthenticationError(
+                    f"OAuth client credentials file {CREDENTIALS_FILE} was not found"
+                )
 
             try:
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    CREDENTIALS_FILE, SCOPES
-                )
+                flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
                 creds = flow.run_local_server(port=0)
                 logger.info("Authentication completed successfully")
+            except YouTubeAuthenticationError:
+                raise
             except Exception as e:
                 logger.error(f"Authentication failed: {e}")
-                raise SystemExit(1)
+                raise YouTubeAuthenticationError("YouTube OAuth authorization failed") from e
 
         # Save the credentials for the next run
         _save_credentials(creds)
@@ -125,16 +135,16 @@ def get_authenticated_service():
         return service
     except Exception as e:
         logger.error(f"Failed to build YouTube API service: {e}")
-        raise SystemExit(1)
+        raise YouTubeAuthenticationError("Failed to initialize the YouTube API client") from e
 
 
 def test_authentication():
     """
     Test authentication by making a simple API call.
-    
+
     Validates that the authentication flow works and the user
     has the necessary permissions for YouTube API access.
-    
+
     Returns:
         bool: True if authentication test passes, False otherwise
     """
@@ -150,7 +160,7 @@ def test_authentication():
             logger.error("Authentication failed: No channel data returned")
             return False
 
-    except SystemExit:
+    except YouTubeAuthenticationError:
         return False
     except Exception as e:
         logger.error(f"Authentication test failed: {e}")
@@ -160,7 +170,7 @@ def test_authentication():
 def reset_authentication():
     """
     Reset authentication by removing stored tokens.
-    
+
     This forces a fresh authentication flow on the next API call.
     Useful when authentication issues occur or when switching accounts.
     """
@@ -176,16 +186,14 @@ def reset_authentication():
 
 if __name__ == "__main__":
     # Allow direct testing of authentication
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-    )
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
     print("Testing YouTube API authentication...")
     success = test_authentication()
-    
+
     if success:
         print("✅ Authentication successful!")
     else:
         print("❌ Authentication failed")
-        
+
     exit(0 if success else 1)

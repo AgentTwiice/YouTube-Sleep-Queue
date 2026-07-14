@@ -12,6 +12,7 @@ class SleepPlaylistManagerTests(unittest.TestCase):
         manager.store = MagicMock()
         manager.ranker = MagicMock()
         manager.ranker.client.model = "model"
+        manager.ranker.cache_fingerprint = "fingerprint"
         manager.config = {
             "max_videos": 2,
             "sleep_minimum_score": 70,
@@ -26,12 +27,17 @@ class SleepPlaylistManagerTests(unittest.TestCase):
         manager = self._make_manager()
         manager.client.get_recent_uploads_from_subscriptions.return_value = []
 
-        result = manager.sync_subscription_videos_to_playlist(
-            "PL1", "2026-01-01", dry_run=True
-        )
+        result = manager.sync_subscription_videos_to_playlist("PL1", "2026-01-01", dry_run=True)
 
         self.assertEqual(result, [])
-        manager.store.complete_run.assert_called_once_with(42, 0, 0)
+        manager.store.complete_run.assert_called_once_with(
+            42,
+            0,
+            0,
+            warning_count=0,
+            status="completed",
+            warning_message=None,
+        )
         manager.ranker.rank_all.assert_not_called()
 
     def test_ranks_recent_candidates_and_applies_threshold_and_queue_size(self):
@@ -60,15 +66,15 @@ class SleepPlaylistManagerTests(unittest.TestCase):
         manager.ranker.rank_all.return_value = ranked
         manager.ranker.select.return_value = [ranked[0]]
         manager.add_videos_to_playlist.return_value = [dict(ranked[0], added=True)]
+        manager.client.get_or_create_playlist.return_value = "PL1"
 
-        result = manager.sync_subscription_videos_to_playlist(
-            "PL1", "2026-01-01", dry_run=True
-        )
+        result = manager.sync_subscription_videos_to_playlist("PL1", "2026-01-01", dry_run=True)
 
-        manager.ranker.rank_all.assert_called_once_with([videos[1], videos[2]], {})
+        self.assertEqual(manager.ranker.rank_all.call_args.args, ([videos[1], videos[2]], {}))
+        self.assertIn("on_ranked", manager.ranker.rank_all.call_args.kwargs)
         manager.ranker.select.assert_called_once_with(ranked)
         manager.store.save_candidates.assert_called_once_with(42, [videos[1], videos[2]])
-        manager.store.complete_run.assert_called_once_with(42, 2, 1, 0, 0)
+        manager.store.complete_run.assert_called_once_with(42, 2, 1, 0, 0, 0, 0, "completed", None)
         self.assertEqual(
             [call.args for call in manager.store.set_run_status.call_args_list],
             [(42, "ranking"), (42, "adding")],
@@ -86,9 +92,7 @@ class SleepPlaylistManagerTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(RuntimeError, "youtube unavailable"):
-            manager.sync_subscription_videos_to_playlist(
-                "PL1", "2026-01-01", dry_run=False
-            )
+            manager.sync_subscription_videos_to_playlist("PL1", "2026-01-01", dry_run=False)
 
         manager.store.fail_run.assert_called_once()
         self.assertEqual(manager.store.fail_run.call_args.args[0], 42)

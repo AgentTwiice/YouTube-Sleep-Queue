@@ -12,6 +12,7 @@ class SleepConfigTests(unittest.TestCase):
         self.assertEqual(config["ollama_base_url"], "http://localhost:11434")
         self.assertEqual(config["sleep_minimum_score"], 70.0)
         self.assertEqual(config["sleep_queue_size"], 10)
+        self.assertIsNone(config["playlist_id"])
 
     def test_rejects_invalid_sleep_configuration(self):
         invalid_values = [
@@ -27,15 +28,9 @@ class SleepConfigTests(unittest.TestCase):
                 ConfigSchema.validate_config(value)
 
     def test_environment_values_are_validated(self):
-        environment = {
-            key: value
-            for key, value in os.environ.items()
-            if key != "SLEEP_QUEUE_SIZE"
-        }
+        environment = {key: value for key, value in os.environ.items() if key != "SLEEP_QUEUE_SIZE"}
         environment["SLEEP_QUEUE_SIZE"] = "0"
-        with patch.dict(os.environ, environment, clear=True), self.assertRaises(
-            ValueError
-        ):
+        with patch.dict(os.environ, environment, clear=True), self.assertRaises(ValueError):
             load_config()
 
 

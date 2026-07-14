@@ -1,7 +1,7 @@
-from contextlib import contextmanager
 import sqlite3
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 
 from yt_sub_playlist.core.sleep_store import SCHEMA_VERSION, SleepQueueStore
@@ -37,9 +37,7 @@ class SleepQueueStoreTests(unittest.TestCase):
             self.assertEqual(
                 connection.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION
             )
-            row = connection.execute(
-                "SELECT sleep_score, status FROM video_candidates"
-            ).fetchone()
+            row = connection.execute("SELECT sleep_score, status FROM video_candidates").fetchone()
             run = connection.execute(
                 "SELECT status, added_count, failed_count FROM queue_runs"
             ).fetchone()
@@ -148,9 +146,7 @@ class SleepQueueStoreTests(unittest.TestCase):
 
 @contextmanager
 def temporary_database_path():
-    file = tempfile.NamedTemporaryFile(
-        suffix=".sqlite3", dir=Path(__file__).parent, delete=False
-    )
+    file = tempfile.NamedTemporaryFile(suffix=".sqlite3", dir=Path(__file__).parent, delete=False)
     path = Path(file.name)
     file.close()
     path.unlink()
