@@ -56,7 +56,7 @@ jobs:
           node --check dashboard/script.js
           node --check dashboard/config.js
           node --check dashboard/channels.js
-          node --test --test-isolation=none tests/frontend/*.test.js
+          node --test tests/frontend/*.test.js
 
       - name: Validate lockfile
         run: uv lock --check
