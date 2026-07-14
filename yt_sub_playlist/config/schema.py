@@ -427,7 +427,7 @@ class ConfigSchema:
         """
         summary_lines = [
             "Configuration Summary:",
-            f"  Playlist: {config.get('playlist_name', 'Auto Playlist from Subscriptions')}",
+            f"  Playlist: {config.get('playlist_name', 'YouTube Sleep Queue')}",
             f"  Visibility: {config.get('playlist_visibility', 'unlisted')}",
         ]
 

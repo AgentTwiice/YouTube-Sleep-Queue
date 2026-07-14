@@ -16,7 +16,12 @@ from typing import Any, Dict, List
 
 from .youtube_client import YouTubeClient
 from .video_filtering import VideoFilter
-from .sleep_ranker import OllamaClient, SleepRanker
+from .sleep_ranker import (
+    PROMPT_VERSION,
+    OllamaClient,
+    SleepRanker,
+    video_metadata_hash,
+)
 from .sleep_store import SleepQueueStore
 from ..config.env_loader import VideoCache
 
@@ -106,69 +111,88 @@ class PlaylistManager:
             List of video metadata dicts with 'added' field indicating success
         """
         run_id = self.store.start_run(dry_run)
-
-        # Step 1: Fetch recent subscription videos
-        logger.info(f"Fetching videos published after {published_after}")
-        videos = self.client.get_recent_uploads_from_subscriptions(
-            published_after=published_after,
-            max_per_channel=5
-        )
-
-        if not videos:
-            logger.info("No recent subscription videos found")
-            self.store.complete_run(run_id, 0, 0)
-            return []
-
-        # Step 2: Filter videos based on criteria
-        filtered_videos = self.filter.filter_videos(videos, channel_whitelist)
-
-        if not filtered_videos:
-            logger.info("No videos passed filters")
-            self.store.complete_run(run_id, 0, 0)
-            return []
-
-        # Bound local model calls using the existing max-videos setting while
-        # preferring the most recently published candidates.
-        filtered_videos = sorted(
-            filtered_videos,
-            key=lambda video: video.get("published_at", ""),
-            reverse=True,
-        )[: self.config["max_videos"]]
-
-        # Step 3: Persist and rank candidates using local Ollama.
-        self.store.save_candidates(run_id, filtered_videos)
-        all_ranked_videos = self.ranker.rank_all(filtered_videos)
-        ranked_videos = [
-            video for video in all_ranked_videos
-            if video["sleep_score"] >= self.config["sleep_minimum_score"]
-        ][: self.config["sleep_queue_size"]]
-        selected_ids = {video["video_id"] for video in ranked_videos}
-        for ranked in all_ranked_videos:
-            self.store.save_score(
-                ranked["video_id"],
-                ranked["sleep_score"],
-                ranked["sleep_rationale"],
-                ranked["sleep_signals"],
-                ranked["video_id"] in selected_ids,
+        try:
+            # Step 1: Fetch recent subscription videos
+            logger.info(f"Fetching videos published after {published_after}")
+            videos = self.client.get_recent_uploads_from_subscriptions(
+                published_after=published_after,
+                max_per_channel=5
             )
 
-        self.store.complete_run(run_id, len(filtered_videos), len(ranked_videos))
+            if not videos:
+                logger.info("No recent subscription videos found")
+                self.store.complete_run(run_id, 0, 0)
+                return []
 
-        if not ranked_videos:
-            logger.info("No videos met the minimum sleep suitability score")
-            return []
+            # Step 2: Filter videos based on criteria
+            filtered_videos = self.filter.filter_videos(videos, channel_whitelist)
 
-        # Step 4: Add the highest-ranked videos to the playlist
-        results = self.add_videos_to_playlist(
-            playlist_id=playlist_id,
-            videos=ranked_videos,
-            dry_run=dry_run
-        )
-        if not dry_run:
-            self.store.mark_added(
+            if not filtered_videos:
+                logger.info("No videos passed filters")
+                self.store.complete_run(run_id, 0, 0)
+                return []
+
+            # Bound local model calls using the existing max-videos setting while
+            # preferring the most recently published candidates.
+            filtered_videos = sorted(
+                filtered_videos,
+                key=lambda video: video.get("published_at") or "",
+                reverse=True,
+            )[: self.config["max_videos"]]
+
+            # Step 3: Persist and rank candidates using local Ollama. Reuse scores
+            # only when the model, prompt, and exact prompt metadata still match.
+            self.store.save_candidates(run_id, filtered_videos)
+            self.store.set_run_status(run_id, "ranking")
+            metadata_hashes = {
+                video["video_id"]: video_metadata_hash(video)
+                for video in filtered_videos
+            }
+            model = self.ranker.client.model
+            cached_scores = self.store.get_cached_scores(
+                metadata_hashes, model, PROMPT_VERSION
+            )
+            all_ranked_videos = self.ranker.rank_all(filtered_videos, cached_scores)
+            ranked_videos = self.ranker.select(all_ranked_videos)
+            selected_ids = {video["video_id"] for video in ranked_videos}
+            self.store.save_rankings(
+                all_ranked_videos, model, PROMPT_VERSION, selected_ids
+            )
+
+            if not ranked_videos:
+                logger.info("No videos met the minimum sleep suitability score")
+                self.store.complete_run(run_id, len(filtered_videos), 0)
+                return []
+
+            # Step 4: Add the highest-ranked videos to the playlist, then finish
+            # the run with the actual insertion outcome.
+            self.store.set_run_status(run_id, "adding")
+            results = self.add_videos_to_playlist(
+                playlist_id=playlist_id,
+                videos=ranked_videos,
+                dry_run=dry_run
+            )
+            successful_ids = [
                 video["video_id"] for video in results if video.get("added")
+            ]
+            added_count = 0 if dry_run else len(successful_ids)
+            failed_count = 0 if dry_run else len(ranked_videos) - added_count
+            if not dry_run:
+                self.store.mark_added(successful_ids)
+            self.store.complete_run(
+                run_id,
+                len(filtered_videos),
+                len(ranked_videos),
+                added_count,
+                failed_count,
             )
-        return results
+            return results
+        except Exception as exc:
+            try:
+                self.store.fail_run(run_id, exc)
+            except Exception:
+                logger.exception("Failed to persist the run failure state")
+            raise
 
     def add_videos_to_playlist(
         self,
@@ -288,7 +312,9 @@ class PlaylistManager:
 
         try:
             # Write CSV report
-            os.makedirs(os.path.dirname(report_path), exist_ok=True)
+            report_directory = os.path.dirname(report_path)
+            if report_directory:
+                os.makedirs(report_directory, exist_ok=True)
             with open(report_path, 'w', newline='', encoding='utf-8') as csvfile:
                 fieldnames = [
                     'title', 'video_id', 'channel_title', 'channel_id',
@@ -300,7 +326,10 @@ class PlaylistManager:
                 writer.writeheader()
                 for video in video_results:
                     # Only write the fields we want in the CSV
-                    row = {field: video.get(field, '') for field in fieldnames}
+                    row = {
+                        field: _spreadsheet_safe(video.get(field, ''))
+                        for field in fieldnames
+                    }
                     writer.writerow(row)
 
             added_count = sum(1 for v in video_results if v.get('added', False))
@@ -336,6 +365,8 @@ class PlaylistManager:
                     'published_at': video.get('published_at', ''),
                     'duration_seconds': int(video.get('duration_seconds', 0)) if video.get('duration_seconds') else 0,
                     'live_broadcast': video.get('live_broadcast', 'none'),
+                    'sleep_score': video.get('sleep_score'),
+                    'sleep_rationale': video.get('sleep_rationale', ''),
                     'added': bool(video.get('added', False))
                 })
 
@@ -366,3 +397,10 @@ class PlaylistManager:
             Dictionary with filtering statistics
         """
         return self.filter.get_filtering_stats()
+
+
+def _spreadsheet_safe(value: Any) -> Any:
+    """Prevent untrusted text from becoming a spreadsheet formula."""
+    if isinstance(value, str) and value.startswith(("=", "+", "-", "@", "\t", "\r")):
+        return f"'{value}"
+    return value

@@ -22,6 +22,16 @@ from .core.youtube_client import dump_api_call_log
 logger = logging.getLogger(__name__)
 
 
+def _video_limit(value: str) -> int:
+    try:
+        limit = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("limit must be an integer") from exc
+    if not 1 <= limit <= 200:
+        raise argparse.ArgumentTypeError("limit must be between 1 and 200")
+    return limit
+
+
 def create_argument_parser() -> argparse.ArgumentParser:
     """Create and configure the command-line argument parser."""
     parser = argparse.ArgumentParser(
@@ -49,7 +59,7 @@ Examples:
 
     parser.add_argument(
         "--limit",
-        type=int,
+        type=_video_limit,
         help="Maximum number of recent videos to fetch (overrides MAX_VIDEOS_TO_FETCH)",
     )
 
@@ -82,7 +92,7 @@ def main():
     try:
         # Load configuration
         config = load_config()
-        if args.limit:
+        if args.limit is not None:
             config["max_videos"] = args.limit
 
         logger.info(

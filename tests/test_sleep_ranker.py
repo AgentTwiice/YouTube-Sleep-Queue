@@ -96,6 +96,24 @@ class SleepRankerTests(unittest.TestCase):
         self.assertIn(json.dumps(video["title"]), captured["body"]["prompt"])
         self.assertEqual(captured["timeout"], 12)
 
+    def test_reuses_valid_cached_score_without_calling_ollama(self):
+        client = FakeClient({})
+        video = {"video_id": "cached", "title": "Rain", "published_at": "2026-01-01"}
+        ranked = SleepRanker(client, 70, 1).rank_all(
+            [video],
+            {"cached": {"score": 88, "rationale": "steady", "signals": ["calm"]}},
+        )
+        self.assertEqual(ranked[0]["sleep_score"], 88)
+        self.assertTrue(ranked[0]["sleep_score_cached"])
+
+    def test_rejects_oversized_ollama_response(self):
+        response = _OversizedResponse()
+        with patch("yt_sub_playlist.core.sleep_ranker.urlopen", return_value=response):
+            with self.assertRaisesRegex(OllamaError, "1 MB"):
+                OllamaClient("http://localhost:11434", "model").score_video(
+                    {"title": "x"}
+                )
+
 
 class _Response:
     def __init__(self, payload):
@@ -107,8 +125,16 @@ class _Response:
     def __exit__(self, *_args):
         return None
 
-    def read(self):
+    def read(self, *_args):
         return json.dumps(self.payload).encode()
+
+
+class _OversizedResponse(_Response):
+    def __init__(self):
+        super().__init__({})
+
+    def read(self, size=-1):
+        return b"x" * size
 
 
 if __name__ == "__main__":

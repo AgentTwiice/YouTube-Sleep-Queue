@@ -11,6 +11,7 @@ class SleepPlaylistManagerTests(unittest.TestCase):
         manager.filter = MagicMock()
         manager.store = MagicMock()
         manager.ranker = MagicMock()
+        manager.ranker.client.model = "model"
         manager.config = {
             "max_videos": 2,
             "sleep_minimum_score": 70,
@@ -18,6 +19,7 @@ class SleepPlaylistManagerTests(unittest.TestCase):
         }
         manager.add_videos_to_playlist = MagicMock()
         manager.store.start_run.return_value = 42
+        manager.store.get_cached_scores.return_value = {}
         return manager
 
     def test_empty_discovery_completes_run(self):
@@ -56,20 +58,40 @@ class SleepPlaylistManagerTests(unittest.TestCase):
             ),
         ]
         manager.ranker.rank_all.return_value = ranked
+        manager.ranker.select.return_value = [ranked[0]]
         manager.add_videos_to_playlist.return_value = [dict(ranked[0], added=True)]
 
         result = manager.sync_subscription_videos_to_playlist(
             "PL1", "2026-01-01", dry_run=True
         )
 
-        manager.ranker.rank_all.assert_called_once_with([videos[1], videos[2]])
+        manager.ranker.rank_all.assert_called_once_with([videos[1], videos[2]], {})
+        manager.ranker.select.assert_called_once_with(ranked)
         manager.store.save_candidates.assert_called_once_with(42, [videos[1], videos[2]])
-        manager.store.complete_run.assert_called_once_with(42, 2, 1)
+        manager.store.complete_run.assert_called_once_with(42, 2, 1, 0, 0)
+        self.assertEqual(
+            [call.args for call in manager.store.set_run_status.call_args_list],
+            [(42, "ranking"), (42, "adding")],
+        )
         manager.add_videos_to_playlist.assert_called_once_with(
             playlist_id="PL1", videos=[ranked[0]], dry_run=True
         )
         manager.store.mark_added.assert_not_called()
         self.assertEqual(result, [dict(ranked[0], added=True)])
+
+    def test_failure_marks_run_failed(self):
+        manager = self._make_manager()
+        manager.client.get_recent_uploads_from_subscriptions.side_effect = RuntimeError(
+            "youtube unavailable"
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "youtube unavailable"):
+            manager.sync_subscription_videos_to_playlist(
+                "PL1", "2026-01-01", dry_run=False
+            )
+
+        manager.store.fail_run.assert_called_once()
+        self.assertEqual(manager.store.fail_run.call_args.args[0], 42)
 
 
 if __name__ == "__main__":

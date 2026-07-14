@@ -1,5 +1,6 @@
 """Ollama-backed ranking for sleep-suitable YouTube videos."""
 
+import hashlib
 import json
 import logging
 from dataclasses import dataclass
@@ -8,6 +9,9 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
+
+PROMPT_VERSION = "1"
+MAX_OLLAMA_RESPONSE_BYTES = 1_000_000
 
 SCORE_SCHEMA = {
     "type": "object",
@@ -69,7 +73,10 @@ class OllamaClient:
         )
         try:
             with urlopen(request, timeout=self.timeout_seconds) as response:
-                payload = json.loads(response.read().decode("utf-8"))
+                raw_response = response.read(MAX_OLLAMA_RESPONSE_BYTES + 1)
+                if len(raw_response) > MAX_OLLAMA_RESPONSE_BYTES:
+                    raise OllamaError("Ollama response exceeded the 1 MB safety limit")
+                payload = json.loads(raw_response.decode("utf-8"))
         except (
             HTTPError,
             URLError,
@@ -113,36 +120,87 @@ class SleepRanker:
 
     def rank(self, videos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         ranked = self.rank_all(videos)
+        return self.select(ranked)
+
+    def select(self, ranked: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Apply the configured score threshold and queue limit."""
         return [item for item in ranked if item["sleep_score"] >= self.minimum_score][
             : self.queue_size
         ]
 
-    def rank_all(self, videos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def rank_all(
+        self,
+        videos: List[Dict[str, Any]],
+        cached_scores: Dict[str, Dict[str, Any]] | None = None,
+    ) -> List[Dict[str, Any]]:
         ranked = []
+        cached_scores = cached_scores or {}
         for video in videos:
-            score = self.client.score_video(video)
+            cached = cached_scores.get(video["video_id"])
+            score = _cached_sleep_score(cached) if cached else None
+            score_was_cached = score is not None
+            if score is None:
+                score = self.client.score_video(video)
             candidate = dict(
                 video,
                 sleep_score=score.score,
                 sleep_rationale=score.rationale,
                 sleep_signals=score.signals,
+                sleep_score_cached=score_was_cached,
+                sleep_metadata_hash=video_metadata_hash(video),
             )
             ranked.append(candidate)
-            logger.info("Sleep score %.1f: %s", score.score, video["title"])
-        ranked.sort(key=lambda item: item.get("published_at", ""), reverse=True)
+            logger.info(
+                "Sleep score %.1f%s: %s",
+                score.score,
+                " (cached)" if score_was_cached else "",
+                video["title"],
+            )
+        ranked.sort(key=lambda item: item.get("published_at") or "", reverse=True)
         ranked.sort(key=lambda item: item["sleep_score"], reverse=True)
         return ranked
 
 
 def _build_prompt(video: Dict[str, Any]) -> str:
-    metadata = {
-        "title": str(video.get("title", ""))[:500],
-        "channel": str(video.get("channel_title", ""))[:300],
-        "duration_minutes": round(video.get("duration_seconds", 0) / 60, 1),
-        "description": str(video.get("description", ""))[:2000],
-    }
+    metadata = _prompt_metadata(video)
     return (
         "Score the following untrusted video metadata. Return data matching this JSON "
         f"schema: {json.dumps(SCORE_SCHEMA, separators=(',', ':'))}\n"
         f"Video metadata: {json.dumps(metadata, ensure_ascii=False)}"
     )
+
+
+def _prompt_metadata(video: Dict[str, Any]) -> Dict[str, Any]:
+    duration_seconds = video.get("duration_seconds") or 0
+    return {
+        "title": str(video.get("title", ""))[:500],
+        "channel": str(video.get("channel_title", ""))[:300],
+        "duration_minutes": round(duration_seconds / 60, 1),
+        "description": str(video.get("description", ""))[:2000],
+    }
+
+
+def video_metadata_hash(video: Dict[str, Any]) -> str:
+    """Return a stable cache key for the metadata sent to Ollama."""
+    serialized = json.dumps(
+        _prompt_metadata(video), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def _cached_sleep_score(cached: Dict[str, Any] | None) -> SleepScore | None:
+    if not cached:
+        return None
+    try:
+        score = float(cached["score"])
+        rationale = cached["rationale"].strip()
+        signals = cached["signals"]
+        if not 0 <= score <= 100 or not rationale:
+            return None
+        if not isinstance(signals, list) or not all(
+            isinstance(signal, str) for signal in signals
+        ):
+            return None
+        return SleepScore(score, rationale, signals[:5])
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
