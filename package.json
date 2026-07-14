@@ -1,7 +1,7 @@
 {
-  "name": "yt-sub-playlist",
+  "name": "youtube-sleep-queue",
   "version": "4.1.0",
-  "description": "Automatically sync YouTube subscription uploads into a custom playlist",
+  "description": "Automatically discovers, ranks and adds personalised sleep-suitable videos from your YouTube subscriptions.",
   "private": true,
   "scripts": {
     "changelog": "conventional-changelog -p angular -i CHANGELOG.md -s",
@@ -14,12 +14,15 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/yourusername/yt-sub-playlist.git"
+    "url": "https://github.com/AgentTwiice/YouTube-Sleep-Queue.git"
   },
   "keywords": [
     "youtube",
     "playlist",
     "automation",
+    "ollama",
+    "python",
+    "recommendation-system",
     "youtube-api",
     "subscription-manager"
   ],

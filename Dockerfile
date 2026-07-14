@@ -57,4 +57,4 @@ USER app
 
 # ENTRYPOINT bakes in the CLI invocation so `docker run <image> --help` works.
 # Override --entrypoint to launch the dashboard or any other module.
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh", "yt-sub-playlist"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh", "youtube-sleep-queue"]

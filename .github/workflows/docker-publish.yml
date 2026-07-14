@@ -4,7 +4,7 @@ name: Publish container image
 # produces tags like `v4.2.0`). Also exposes `workflow_dispatch` so a clean
 # rebuild can be kicked off manually without a version bump.
 #
-# Publishes a multi-arch (amd64 + arm64) image to ghcr.io/<owner>/yt-sub-playlist
+# Publishes a multi-arch (amd64 + arm64) image to ghcr.io/<owner>/youtube-sleep-queue
 # with the following tags on a `v<semver>` push:
 #   - {{version}}     e.g. 4.2.0
 #   - {{major}}.{{minor}}  e.g. 4.2
@@ -47,7 +47,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/yt-sub-playlist
+          images: ghcr.io/${{ github.repository_owner }}/youtube-sleep-queue
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
